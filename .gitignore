@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+.DS_Store
+.venv/
+output/
+*.mp4
+*.parquet
+*.nosync/
+examples/synthetic.tif

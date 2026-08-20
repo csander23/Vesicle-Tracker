@@ -1,0 +1,21 @@
+name: vesicletrack
+channels: [conda-forge]
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - scikit-image
+  - matplotlib
+  - pyyaml
+  - tifffile
+  - pyarrow
+  - astropy
+  - photutils
+  - trackpy
+  - opencv
+  - ffmpeg            # needed only for video output
+  - jupyterlab
+  - tqdm
+  - pip
+  - pip: [nd2]        # optional, for reading .nd2 directly

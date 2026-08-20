@@ -1,0 +1,204 @@
+"""Parameters for a run, loaded from YAML and validated once at the start.
+
+Everything the pipeline does is decided here. Nothing downstream reads a global or a
+hard-coded constant, so a run is fully described by its config file plus the input
+path - which is what makes a result reproducible and a new dataset a matter of editing
+numbers rather than editing code.
+
+Two parameters carry physical units and must be set for a new dataset; the rest have
+defaults that were validated on 60 s spinning-disk recordings of Rab5-RFP endosomes in
+glia at ~22 fps:
+
+    dt_seconds    frame interval. Every rate, and the coarse-graining window, is in
+                  seconds and converts through this.
+    um_per_px     pixel size. Optional - leave null to work in pixels. When set,
+                  distance columns are additionally reported in microns.
+
+Load with `Config.load("config/default.yaml")`, or `Config.load(path, dt_seconds=0.05)`
+to override individual fields from the notebook without editing the file.
+"""
+from __future__ import annotations
+
+import copy
+import dataclasses
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+@dataclass
+class DriftConfig:
+    enabled: bool = True
+    smoothing_sigma: float = 6.0      # px; blur used to register on static content
+    reference_frames: int = 20        # frames median-projected to form the reference
+    median_filter: int = 5            # temporal smoothing of the shift series
+    min_span_px: float = 0.5          # below this total drift, skip applying it
+
+
+@dataclass
+class DetectConfig:
+    method: str = "dao"               # "dao" (photutils) - the only built-in backend
+    psf_sigma_px: float = 1.3         # approximate spot sigma
+    threshold_sigma: float = 3.0      # detection threshold, in background sigma
+    roundness: float = 0.7            # |roundness1| cut; rejects streaks and edges
+    min_separation_px: float = 4.0    # per-frame non-maximum suppression radius
+    background_sigma: float = 0.0     # >0 subtracts a gaussian background first
+
+
+@dataclass
+class LinkConfig:
+    search_range_px: float = 3.0      # max frame-to-frame displacement
+    memory_frames: int = 15           # frames a spot may vanish and still be relinked
+    min_length_frames: int = 40       # tracks shorter than this are dropped
+    merge_radius_px: float = 4.0      # co-located duplicate tracks are merged
+
+
+@dataclass
+class MetricsConfig:
+    tau_frames: int = 22              # coarse-graining window for run detection (~1 s)
+    tau_directed_frames: int = 90     # timescale defining "consistent direction" (~4 s)
+    max_turn_deg: float = 60.0        # a step turning more than this ends a run
+    min_run_disp_px: float = 1.0      # runs shorter than this are not transport
+    min_run_steps: int = 2            # a run must persist >= 2 coarse steps
+    n_permutations: int = 200         # per-vesicle null; 0 disables the p-value
+    random_seed: int = 0
+
+
+@dataclass
+class ClassifyConfig:
+    """Thresholds turning per-vesicle metrics into labels.
+
+    `use_permutation` is the honest default: a vesicle is a mover if its directed
+    displacement beats its own direction-randomised null, not if it clears a fixed
+    number. Set false to fall back to the rate threshold alone.
+    """
+    use_permutation: bool = True
+    p_threshold: float = 0.05
+    mover_rate_px_per_s: float = 0.15
+    mover_min_net_px: float = 4.0
+    exclude_max_step_px: float = 5.0   # single jump above this = suspected mislink
+    exclude_n_big_steps: int = 5       # repeated wobble = suspected identity swap
+    big_step_px: float = 3.0
+
+
+@dataclass
+class RenderConfig:
+    three_panel: bool = True
+    per_vesicle_images: bool = True
+    per_vesicle_videos: bool = False   # off by default: one file per vesicle
+    overview_video: bool = False
+    max_vesicle_outputs: int = 25      # cap, so a dense cell cannot emit thousands
+    trail_frames: int = 40
+    frame_step: int = 4                # temporal downsample for videos
+    fps: int = 20
+    dpi: int = 150
+    percentiles: tuple = (1.0, 99.7)   # display stretch
+    ffmpeg: str = "ffmpeg"
+
+
+@dataclass
+class Config:
+    dt_seconds: float = 0.0446
+    um_per_px: float | None = None
+    output_dir: str = "output"
+    drift: DriftConfig = field(default_factory=DriftConfig)
+    detect: DetectConfig = field(default_factory=DetectConfig)
+    link: LinkConfig = field(default_factory=LinkConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
+    classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    render: RenderConfig = field(default_factory=RenderConfig)
+
+    # ---------------------------------------------------------------- loading
+    @classmethod
+    def load(cls, path: str | Path | None = None, **overrides: Any) -> "Config":
+        raw: dict = {}
+        if path is not None:
+            raw = yaml.safe_load(Path(path).read_text()) or {}
+        cfg = cls._from_dict(raw)
+        for k, v in overrides.items():
+            cfg.set(k, v)
+        cfg.validate()
+        return cfg
+
+    @classmethod
+    def _from_dict(cls, raw: dict) -> "Config":
+        sections = {f.name: f.type for f in dataclasses.fields(cls)}
+        kwargs: dict = {}
+        for key, val in raw.items():
+            if key not in sections:
+                raise ValueError(
+                    f"unknown config key {key!r}. Known keys: {sorted(sections)}")
+            sub = {"drift": DriftConfig, "detect": DetectConfig, "link": LinkConfig,
+                   "metrics": MetricsConfig, "classify": ClassifyConfig,
+                   "render": RenderConfig}.get(key)
+            if sub is None:
+                kwargs[key] = val
+            else:
+                known = {f.name for f in dataclasses.fields(sub)}
+                bad = set(val or {}) - known
+                if bad:
+                    raise ValueError(f"unknown key(s) {sorted(bad)} under {key!r}. "
+                                     f"Known: {sorted(known)}")
+                kwargs[key] = sub(**(val or {}))
+        return cls(**kwargs)
+
+    def set(self, dotted: str, value: Any) -> None:
+        """cfg.set("detect.threshold_sigma", 2.5) - for notebook overrides."""
+        obj = self
+        parts = dotted.split(".")
+        for p in parts[:-1]:
+            obj = getattr(obj, p)
+        if not hasattr(obj, parts[-1]):
+            raise ValueError(f"unknown config field {dotted!r}")
+        setattr(obj, parts[-1], value)
+
+    def copy(self, **overrides: Any) -> "Config":
+        cfg = copy.deepcopy(self)
+        for k, v in overrides.items():
+            cfg.set(k, v)
+        cfg.validate()
+        return cfg
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    def save(self, path: str | Path) -> None:
+        """Written next to every result, so a figure can always be traced to its run."""
+        Path(path).write_text(yaml.safe_dump(self.to_dict(), sort_keys=False))
+
+    # ------------------------------------------------------------- validation
+    def validate(self) -> None:
+        if self.dt_seconds <= 0:
+            raise ValueError("dt_seconds must be > 0")
+        if self.um_per_px is not None and self.um_per_px <= 0:
+            raise ValueError("um_per_px must be > 0 or null")
+        if self.detect.method != "dao":
+            raise ValueError(f"unknown detect.method {self.detect.method!r}; "
+                             "only 'dao' is built in")
+        if self.metrics.tau_directed_frames < self.metrics.tau_frames:
+            raise ValueError("tau_directed_frames should be >= tau_frames: the "
+                             "directed path is measured at the coarser timescale")
+        if self.metrics.min_run_steps < 2:
+            raise ValueError(
+                "min_run_steps < 2 lets a single step count as a directed run, which "
+                "collapses the directed metric onto plain path length and destroys "
+                "its contrast against the null")
+        if not 0 < self.classify.p_threshold < 1:
+            raise ValueError("classify.p_threshold must be in (0, 1)")
+        if self.classify.use_permutation and self.metrics.n_permutations < 20:
+            raise ValueError("classify.use_permutation needs metrics.n_permutations "
+                             ">= 20 to give a usable p-value")
+
+    # ----------------------------------------------------------------- units
+    @property
+    def tau_seconds(self) -> float:
+        return self.metrics.tau_frames * self.dt_seconds
+
+    @property
+    def tau_directed_seconds(self) -> float:
+        return self.metrics.tau_directed_frames * self.dt_seconds
+
+    def px_to_um(self, v):
+        return None if self.um_per_px is None else v * self.um_per_px
