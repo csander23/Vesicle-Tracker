@@ -11,3 +11,4 @@ output/
 *.parquet
 *.nosync/
 examples/synthetic.tif
+.pytest_cache/

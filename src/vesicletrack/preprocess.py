@@ -11,6 +11,8 @@ filtered so a single bad frame cannot inject a jump.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from scipy.ndimage import gaussian_filter, median_filter
 from scipy.ndimage import shift as nd_shift
@@ -32,10 +34,18 @@ def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float
     ref = gaussian_filter(np.median(stack[:nref], axis=0).astype(np.float32), sig)
 
     shifts = np.zeros((len(stack), 2), np.float32)
+    if not np.isfinite(ref).any() or float(ref.std()) < 1e-9:
+        # A featureless reference (blank or saturated) gives phase correlation nothing
+        # to lock onto; it would return noise. No drift is the honest answer.
+        return stack, shifts, 0.0
     for t, frame in enumerate(stack):
-        s, _, _ = phase_cross_correlation(
-            ref, gaussian_filter(frame.astype(np.float32), sig),
-            upsample_factor=10, normalization=None)
+        blurred = gaussian_filter(frame.astype(np.float32), sig)
+        if float(blurred.std()) < 1e-9:
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            s, _, _ = phase_cross_correlation(ref, blurred, upsample_factor=10,
+                                              normalization=None)
         shifts[t] = s
 
     k = cfg.drift.median_filter

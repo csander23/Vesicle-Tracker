@@ -18,7 +18,7 @@ from vesicletrack import Config, analyse  # noqa: E402
 from vesicletrack.metrics import check_ordering  # noqa: E402
 
 MOVIE = ROOT / "examples" / "synthetic.tif"
-N_MOVER, N_TOTAL = 6, 46
+N_MOVER, N_TOTAL = 6, 30
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +34,7 @@ def result():
 
 
 def test_finds_most_vesicles(result):
-    assert result.summary["n_vesicles"] >= N_TOTAL - 3
+    assert result.summary["n_vesicles"] >= N_TOTAL - 2
 
 
 def test_recovers_the_planted_movers(result):

@@ -14,11 +14,43 @@ Two steps beyond a plain call:
 """
 from __future__ import annotations
 
+import inspect
+import warnings
+from functools import lru_cache
+
 import numpy as np
 import pandas as pd
 from astropy.stats import gaussian_sigma_to_fwhm, sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.ndimage import gaussian_filter
+
+
+@lru_cache(maxsize=1)
+def _uses_roundness_range() -> bool:
+    """photutils >= 3.0 replaced roundlo/roundhi with roundness_range=(lo, hi).
+
+    Detected from the signature rather than from a version string, so this keeps
+    working whenever the change actually lands rather than when we guess it did.
+    """
+    return "roundness_range" in inspect.signature(DAOStarFinder).parameters
+
+
+def _roundness_kwargs(r: float) -> dict:
+    return ({"roundness_range": (-r, r)} if _uses_roundness_range()
+            else {"roundlo": -r, "roundhi": r})
+
+
+def _col(tbl, *names):
+    """First column name that exists.
+
+    photutils 3.0 renamed xcentroid -> x_centroid and will drop the old names in 4.0.
+    Accepting either keeps this working across that break instead of emitting a
+    deprecation warning per detection now and failing outright later.
+    """
+    for n in names:
+        if n in tbl.colnames:
+            return n
+    raise KeyError(f"none of {names} in detection table; got {tbl.colnames}")
 
 
 def _nms(x, y, flux, min_sep):
@@ -46,14 +78,19 @@ def detect_frame(img: np.ndarray, cfg) -> pd.DataFrame:
     if std <= 0 or not np.isfinite(std):
         return pd.DataFrame(columns=["x", "y", "flux"])
     finder = DAOStarFinder(fwhm=d.psf_sigma_px * gaussian_sigma_to_fwhm,
-                          threshold=d.threshold_sigma * std,
-                          roundlo=-d.roundness, roundhi=d.roundness)
-    tbl = finder(a - median)
+                           threshold=d.threshold_sigma * std,
+                           **_roundness_kwargs(d.roundness))
+    # photutils warns when a frame yields nothing, or nothing passes the shape cuts.
+    # Both are normal (a blank frame, a frame between blinks) and are handled below,
+    # so the warning is noise that would read as an error to a user.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tbl = finder(a - median)
     if tbl is None or len(tbl) == 0:
         return pd.DataFrame(columns=["x", "y", "flux"])
-    x = np.asarray(tbl["xcentroid"], float)
-    y = np.asarray(tbl["ycentroid"], float)
-    flux = np.asarray(tbl["flux"], float)
+    x = np.asarray(tbl[_col(tbl, "x_centroid", "xcentroid")], float)
+    y = np.asarray(tbl[_col(tbl, "y_centroid", "ycentroid")], float)
+    flux = np.asarray(tbl[_col(tbl, "flux")], float)
     keep = _nms(x, y, flux, d.min_separation_px)
     return pd.DataFrame({"x": x[keep], "y": y[keep], "flux": flux[keep]})
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import sys
 from pathlib import Path
 
 from .config import Config
@@ -29,7 +30,13 @@ def main(argv=None) -> int:
         over["um_per_px"] = a.um_per_px
     if a.videos:
         over["render.per_vesicle_videos"] = True
-    cfg = Config.load(a.config, **over)
+    try:
+        cfg = Config.load(a.config, **over)
+    except (ValueError, OSError) as e:
+        # A bad parameter is user error, not a bug: say what is wrong and stop,
+        # rather than printing a traceback the user has to read backwards.
+        print(f"vesicletrack: configuration error: {e}", file=sys.stderr)
+        return 2
 
     files: list[str] = []
     for pat in a.inputs:

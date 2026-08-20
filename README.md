@@ -32,7 +32,8 @@ in opposite directions:
 | **gross** | Σ per-frame step lengths | a *stationary* vesicle accumulates localisation noise every frame. Over 1000 frames it "travels" hundreds of pixels. Gross path is mostly noise. |
 | **net** | \|end − start\| | blind to a vesicle that runs out and comes back, or makes several runs in different directions. A genuinely motile trajectory scores ≈ 0. |
 
-In the demo below, a vesicle that moved **1.5 µm** reports **17.7 µm** of gross path.
+In the demo below, a vesicle that moved **14 px** reports **179 px** of gross path — and
+the *stationary* ones report **181 px**. Gross cannot tell them apart at all.
 
 **directed** sits between them. Positions are averaged in windows of τ frames before
 the path is measured:
@@ -71,6 +72,7 @@ p-value follows.
 ```bash
 conda env create -f environment.yml && conda activate vesicletrack
 pip install -e .
+pytest -q                      # 29 tests, ~1 min
 ```
 
 or
@@ -88,13 +90,32 @@ skipped with a printed warning and images are unaffected.
 ## Try it without data
 
 ```bash
-python examples/make_synthetic.py           # 40 static + 6 movers, known truth, 3 px drift
+python examples/make_synthetic.py           # 24 static + 6 movers, known truth, 3 px drift
 python -m vesicletrack.cli examples/synthetic.tif --dt 0.05 -o examples/output
 ```
 
-Recovers 45 of 46 vesicles and exactly the 6 planted movers, p = 0.01 against
-p = 1.00 for the static ones. Run this after changing any parameter — it is the
-fastest check that a change did not break detection.
+Recovers all 30 vesicles and exactly the 6 planted movers, p = 0.01 against p = 1.00
+for the static ones:
+
+| class | net | directed | gross | p |
+|---|---|---|---|---|
+| mover (n=6) | 13.96 px | 11.68 px | 179.1 px | 0.005 |
+| confined (n=24) | 0.44 px | 0.55 px | 180.9 px | 1.000 |
+
+Net separates the classes 32-fold; **gross separates them not at all** — the confined
+vesicles report *more* gross path than the movers. That is the whole argument for the
+directed metric, in one table.
+
+`p = 0.005` is the floor, `1/(n_permutations + 1)`: with 200 permutations the null
+never once beat the observation. It is not a p-value that can go lower without raising
+`metrics.n_permutations`.
+
+Planted positions are rejection-sampled with a 14 px minimum separation held over the
+*whole* movie, so no mover ever passes close enough to a static vesicle to cause an
+identity swap. Without that the "correct" answer changes with field size.
+
+Run this after changing any parameter — it is the fastest check that a change did not
+break detection.
 
 ---
 
