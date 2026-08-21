@@ -244,10 +244,15 @@ def test_seed_changes_only_the_null(movie):
 
 # --------------------------------------------------------------- json config
 def test_json_config_loads_identically(tmp_path):
-    """JSON is a subset of YAML, so both are accepted with no special handling."""
+    """JSON is a subset of YAML, so both are accepted with no special handling.
+
+    Only the YAML is shipped - it is the single source of truth, and it carries the
+    comments. JSON round-trips through save(), it is not maintained in parallel.
+    """
     y = Config.load(ROOT / "config" / "default.yaml")
-    j = Config.load(ROOT / "config" / "default.json")
-    assert y.to_dict() == j.to_dict()
+    p = tmp_path / "exported.json"
+    y.save(p)
+    assert Config.load(p).to_dict() == y.to_dict()
 
 
 def test_save_format_follows_extension(tmp_path):
@@ -279,9 +284,11 @@ def test_non_mapping_config_is_refused(tmp_path):
 
 def test_cli_accepts_json_config(tmp_path, movie):
     import subprocess
+    cj = tmp_path / "cfg.json"
+    Config.load(ROOT / "config" / "default.yaml").save(cj)
     out = subprocess.run(
         [sys.executable, "-m", "vesicletrack.cli", str(movie),
-         "-c", str(ROOT / "config" / "default.json"), "--dt", "0.05",
+         "-c", str(cj), "--dt", "0.05",
          "-o", str(tmp_path / "o"), "--quiet"],
         capture_output=True, text=True, cwd=ROOT,
         env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")})

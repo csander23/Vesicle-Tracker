@@ -121,18 +121,20 @@ break detection.
 
 ## Config files: YAML or JSON
 
-Both work, interchangeably — JSON is a subset of YAML, so a `.json` config loads with
-no special handling:
+**YAML is the format to use.** `config/default.yaml` is the single source of truth and
+the only config file shipped, because it carries comments — and the comments are half
+of what makes the parameters usable.
 
 ```python
-Config.load("config/default.yaml")     # shipped, commented
-Config.load("config/default.json")     # same settings, machine-friendly
+Config.load("config/default.yaml")     # the normal path
 Config.load(None, dt_seconds=0.05)     # all defaults, overridden inline
+Config.load("my_run.json")             # JSON also loads, if you have one
 ```
 
-```bash
-vesicletrack run movie.tif -c config/default.json
-```
+JSON is supported for the case where a config is *generated* by another program — a
+sweep script, a LIMS, a web front end — rather than maintained by a person. It is not
+shipped as a second copy of the defaults: two files holding the same values drift the
+moment one is edited.
 
 `save()` writes whichever format the extension asks for, so a config generated in a
 notebook can be handed straight to another program:
@@ -142,10 +144,6 @@ cfg.save("runs/exp1.json")     # JSON
 cfg.save("runs/exp1.yaml")     # YAML
 cfg.to_json()                  # or just the string
 ```
-
-**Prefer YAML when a person maintains the file** — it takes comments, and the comments
-in `config/default.yaml` are half of what makes the parameters usable. **Prefer JSON
-when a program generates it** (a sweep, a LIMS, a web front end).
 
 Unknown keys are rejected in either format, so `thresold_sigma` fails loudly at load
 instead of being silently ignored and leaving you wondering why the parameter did
@@ -252,19 +250,38 @@ Leaving those in inflates the mover count.
 ## Layout
 
 ```
-src/vesicletrack/
-  config.py      parameters, validation, YAML round-trip
-  io.py          stack loading (tif / nd2 / npy), table writing
-  preprocess.py  stage drift correction
-  detect.py      per-frame spot detection + NMS
-  linking.py     trackpy linking, short-track removal, co-located merge
-  metrics.py     net / gross / directed, permutation null, classification
-  render.py      three-panel, per-vesicle images, videos
-  pipeline.py    analyse() / analyse_many() / Result
-  cli.py         command line
-notebooks/vesicle_analysis.ipynb    walkthrough, parameter tuning, batch
-examples/make_synthetic.py          ground-truth movie generator
+vesicletrack/
+├── README.md                  you are here — what it does and why
+├── config/
+│   └── default.yaml           every parameter, commented. Copy and edit this
+├── docs/
+│   └── PARAMETERS.md          full reference: units, defaults, which way to tune
+├── notebooks/
+│   └── vesicle_analysis.ipynb walkthrough: run → inspect → tune → batch
+├── examples/
+│   └── make_synthetic.py      ground-truth movie (24 static + 6 movers)
+├── tests/                     pytest -q
+│   ├── test_smoke.py          does it get the known answer right?
+│   ├── test_robustness.py     edge cases, odd inputs, every switch
+│   └── test_docs.py           docs cannot drift from the code
+└── src/vesicletrack/
+    ├── config.py              parameters, validation, YAML/JSON round-trip
+    ├── io.py                  load stacks (tif/nd2/npy), write tables
+    ├── preprocess.py          stage drift correction
+    ├── detect.py              per-frame spot detection + NMS
+    ├── linking.py             trackpy linking, short-track removal, merge
+    ├── metrics.py             net / gross / directed, null, classification
+    ├── render.py              three-panel, per-vesicle images, videos
+    ├── pipeline.py            analyse() / analyse_many() / Result
+    └── cli.py                 command line
 ```
+
+Read in this order to understand it: `config/default.yaml` (what is adjustable) →
+`metrics.py` (what is measured) → `pipeline.py` (the order things happen in).
+
+**Parameter reference: [docs/PARAMETERS.md](docs/PARAMETERS.md)** — every parameter
+with its units, default, and which direction to move it. The same notes are inline in
+`config/default.yaml`, and a test asserts the two never drift apart from the code.
 
 ## Licence
 
