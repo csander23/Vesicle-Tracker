@@ -240,3 +240,50 @@ def test_seed_changes_only_the_null(movie):
     b = analyse(movie, base_cfg(**{"metrics.random_seed": 7}), verbose=False).vesicles
     np.testing.assert_allclose(a.directed, b.directed)      # measurement is fixed
     assert not np.allclose(a.directed_null, b.directed_null)
+
+
+# --------------------------------------------------------------- json config
+def test_json_config_loads_identically(tmp_path):
+    """JSON is a subset of YAML, so both are accepted with no special handling."""
+    y = Config.load(ROOT / "config" / "default.yaml")
+    j = Config.load(ROOT / "config" / "default.json")
+    assert y.to_dict() == j.to_dict()
+
+
+def test_save_format_follows_extension(tmp_path):
+    """A .json file must contain JSON. Writing YAML under a .json name is a lie the
+    next program to read it will not survive."""
+    import json as _json
+    c = Config.load(ROOT / "config" / "default.yaml", **{"dt_seconds": 0.02})
+    pj, py = tmp_path / "c.json", tmp_path / "c.yaml"
+    c.save(pj)
+    c.save(py)
+    assert _json.loads(pj.read_text())["dt_seconds"] == 0.02      # real JSON
+    assert not py.read_text().lstrip().startswith("{")            # real YAML
+    assert Config.load(pj).to_dict() == Config.load(py).to_dict()
+
+
+def test_json_config_rejects_typos(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text('{"detect": {"thresold_sigma": 3.0}}')
+    with pytest.raises(ValueError, match="unknown key"):
+        Config.load(p)
+
+
+def test_non_mapping_config_is_refused(tmp_path):
+    p = tmp_path / "list.json"
+    p.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError, match="mapping of settings"):
+        Config.load(p)
+
+
+def test_cli_accepts_json_config(tmp_path, movie):
+    import subprocess
+    out = subprocess.run(
+        [sys.executable, "-m", "vesicletrack.cli", str(movie),
+         "-c", str(ROOT / "config" / "default.json"), "--dt", "0.05",
+         "-o", str(tmp_path / "o"), "--quiet"],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")})
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "o" / "batch_summary.csv").exists()

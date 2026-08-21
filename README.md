@@ -119,6 +119,45 @@ break detection.
 
 ---
 
+## Config files: YAML or JSON
+
+Both work, interchangeably — JSON is a subset of YAML, so a `.json` config loads with
+no special handling:
+
+```python
+Config.load("config/default.yaml")     # shipped, commented
+Config.load("config/default.json")     # same settings, machine-friendly
+Config.load(None, dt_seconds=0.05)     # all defaults, overridden inline
+```
+
+```bash
+vesicletrack run movie.tif -c config/default.json
+```
+
+`save()` writes whichever format the extension asks for, so a config generated in a
+notebook can be handed straight to another program:
+
+```python
+cfg.save("runs/exp1.json")     # JSON
+cfg.save("runs/exp1.yaml")     # YAML
+cfg.to_json()                  # or just the string
+```
+
+**Prefer YAML when a person maintains the file** — it takes comments, and the comments
+in `config/default.yaml` are half of what makes the parameters usable. **Prefer JSON
+when a program generates it** (a sweep, a LIMS, a web front end).
+
+Unknown keys are rejected in either format, so `thresold_sigma` fails loudly at load
+instead of being silently ignored and leaving you wondering why the parameter did
+nothing.
+
+Overrides use dotted paths and never mutate the original, which makes a sweep a loop:
+
+```python
+for thr in [2.5, 3.0, 3.5]:
+    analyse(movie, cfg.copy(**{"detect.threshold_sigma": thr}))
+```
+
 ## Setting parameters for a new dataset
 
 Two fields are **required** and are not guessable from the images:
