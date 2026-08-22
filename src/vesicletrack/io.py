@@ -22,9 +22,12 @@ def load_stack(path: str | Path, channel: int | None = None,
     """
     path = Path(path)
     suf = path.suffix.lower()
+    axes = None
     if suf in (".tif", ".tiff"):
         import tifffile
-        arr = tifffile.imread(str(path))
+        with tifffile.TiffFile(str(path)) as tf:
+            axes = getattr(tf.series[0], "axes", None)
+            arr = tf.asarray()
     elif suf == ".nd2":
         arr = _load_nd2(path, channel=channel)
         channel = None if arr.ndim == 3 else channel
@@ -48,6 +51,14 @@ def load_stack(path: str | Path, channel: int | None = None,
         arr = arr[:, channel]
         arr = arr.max(axis=1) if z_project == "max" else arr.mean(axis=1)
         return _check_3d(arr, path, orig_shape)
+    # The file usually says what its axes ARE - tifffile exposes series[0].axes as
+    # e.g. 'ZYX' or 'TYX'. A z-stack has the same 3-D shape as a time series and was
+    # silently "tracked", producing tracks of nothing. Trust the metadata when present.
+    if arr.ndim == 3 and axes and len(axes) == 3 and axes[0] not in ("T", "I", "Q"):
+        raise ValueError(
+            f"{path.name} has axes {axes!r}: the first axis is {axes[0]!r}, not time. "
+            f"This looks like a {'z-stack' if axes[0] == 'Z' else 'non-time series'}, "
+            "not a time-lapse. Reduce it to (T, Y, X) first, or pass z_project=.")
     if arr.ndim == 4:                                  # T,C,Y,X or T,Z,Y,X
         if channel is not None:
             arr = arr[:, channel]
@@ -60,16 +71,25 @@ def load_stack(path: str | Path, channel: int | None = None,
                 f"{path.name} has shape {orig_shape}: 4 axes. Pass channel=... to pick "
                 "a channel, or z_project='max'/'mean' to flatten z. Refusing to guess "
                 "which axis is time.")
-    return _check_3d(arr, path, orig_shape)
+    return _check_3d(arr, path, orig_shape, axes)
 
 
-def _check_3d(arr, path, orig_shape):
+def _check_3d(arr, path, orig_shape, axes=None):
     if arr.ndim != 3:
         raise ValueError(f"expected a (T, Y, X) stack, got shape {arr.shape} "
                          f"(file was {orig_shape})")
     if arr.shape[0] < 3:
         raise ValueError(f"{path.name} has only {arr.shape[0]} frames "
                          f"(shape {orig_shape}); nothing to track")
+    # No metadata (.npy): a stack with fewer "frames" than pixels on a side is far
+    # more likely a z-stack or a transposed array than a real recording.
+    if axes is None and arr.shape[0] <= min(arr.shape[1], arr.shape[2]):
+        import warnings
+        warnings.warn(
+            f"{path.name} has shape {arr.shape}: only {arr.shape[0]} frames for a "
+            f"{arr.shape[1]}x{arr.shape[2]} image. If this is a z-stack or a "
+            "transposed array, every result will be meaningless. Check the axis "
+            "order.", stacklevel=3)
     return arr
 
 
@@ -127,7 +147,7 @@ def save_table(df: pd.DataFrame, path: str | Path) -> Path:
     """Parquet when pyarrow is available (tracks get long), CSV otherwise."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix == ".parquet":
+    if path.suffix.lower() == ".parquet":
         try:
             df.to_parquet(path, index=False)
             return path

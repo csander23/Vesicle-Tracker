@@ -150,16 +150,19 @@ class Result:
                                                      default=str))
         written["summary"] = out / "summary.json"
 
-        do_render = cfg.render.three_panel if render is None else render
-        if do_render and self.stack is not None and len(self.tracks):
+        # render=False means NO figures at all. Previously it suppressed only the
+        # three-panel and still wrote distances.png plus up to 25 per-vesicle figures.
+        any_render = True if render is None else bool(render)
+        do_panel = (cfg.render.three_panel if render is None else bool(render))
+        if do_panel and self.stack is not None and len(self.tracks):
             written["three_panel"] = _render.three_panel(
                 self.stack, self.tracks, self.vesicles, cfg,
                 out / "three_panel.png", title=self.name)
-        if len(self.vesicles):
+        if any_render and len(self.vesicles):
             written["distances"] = _render.distance_summary(
                 self.vesicles, cfg, out / "distances.png")
 
-        if self.stack is not None and len(self.vesicles):
+        if any_render and self.stack is not None and len(self.vesicles):
             sel = self._selection()
             if cfg.render.per_vesicle_images:
                 d = out / "vesicles"

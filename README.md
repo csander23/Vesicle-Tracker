@@ -220,12 +220,20 @@ first) so a dense field cannot emit thousands of files. The cap is recorded in
 | `net`, `gross`, `directed` | the three distances, px (`*_um` when `um_per_px` set) |
 | `net_coarse` | \|c_K − c_1\|; the quantity the ordering theorem bounds |
 | `*_rate` | per second |
-| `directed_p` | permutation p-value against the vesicle's own null |
-| `directed_excess` | observed − null mean |
-| `klass` | `mover` / `confined` / `excluded` |
+| `directed_measurable` | False when the track spans under two τ-windows; `directed` is then NaN, never 0 |
+| `runs_total` | run-detection metric at the **shorter** `tau_frames` |
+| `runs_p`, `runs_z`, `runs_excess` | the permutation test **of `runs_total`** — not of `directed` |
+| `span_frames`, `observed_frames` | track span vs frames actually detected — different whenever a dropout was bridged |
+| `n_gaps`, `longest_gap`, `frac_observed` | how much of the span was really seen |
+| `is_censored` | present in the first or last frame, so its true lifetime is unknown |
+| `sigma_px`, `sigma_deconv_px`, `at_diffraction_limit` | size (read the caveats) |
+| `roi`, `roi_frac`, `roi_changed` | which region, and whether it moved between regions |
+| `passes_filter`, `filter_reason` | filters label, they never delete |
+| `klass` | `mover` / `confined` / `excluded` / `invalid` |
 | `persistence` | lag-1 direction cosine; ≈ −0.5 for pure localisation noise |
 | `rg`, `aniso` | radius of gyration, anisotropy |
 
+`invalid` means a non-finite coordinate: no biological claim is made about it.
 `excluded` is a **tracking-quality** judgement, not biology: a single large jump or
 repeated large steps is the signature of an identity swap between nearby vesicles.
 Leaving those in inflates the mover count.

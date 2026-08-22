@@ -32,7 +32,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-KLASS_COLOR = {"mover": "#2ecc40", "confined": "#00c8ff", "excluded": "#ff4136"}
+KLASS_COLOR = {"mover": "#2ecc40", "confined": "#00c8ff", "excluded": "#ff4136",
+               "invalid": "#b10dc9"}
+UNKNOWN_COLOR = "#aaaaaa"
+
+
+def klass_color(k) -> str:
+    """Never raise on an unfamiliar label. A new class must not kill the renderer."""
+    return KLASS_COLOR.get(k, UNKNOWN_COLOR)
 
 
 # ------------------------------------------------------------------ helpers
@@ -75,9 +82,8 @@ def three_panel(stack, tracks, vesicles, cfg, out_path, title=""):
     for p, d in tracks.groupby("particle"):
         k = kl.get(p, "confined")
         counts[k] = counts.get(k, 0) + 1
-        ax[2].plot(d.x, d.y, lw=0.9, color=KLASS_COLOR.get(k, "#aaaaaa"), alpha=0.95)
-    lab = "   ".join(f"{k} {counts.get(k, 0)}"
-                     for k in ("mover", "confined", "excluded"))
+        ax[2].plot(d.x, d.y, lw=0.9, color=klass_color(k), alpha=0.95)
+    lab = "   ".join(f"{k} {v}" for k, v in sorted(counts.items()))
     ax[2].set_title(f"Classified\n{lab}", fontsize=12, weight="bold")
     handles = [plt.Line2D([], [], color=c, lw=2, label=k)
                for k, c in KLASS_COLOR.items()]
@@ -104,12 +110,15 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
     crop = to_uint8(stack[f[0]:f[-1] + 1, y0:y1, x0:x1].max(axis=0), lo, hi)
 
     from .metrics import coarse
-    cx, cy, _ = coarse(x, y, f, cfg.metrics.tau_directed_frames)
+    cx, cy, _, _ = coarse(x, y, f, cfg.metrics.tau_directed_frames)
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 5.2), facecolor="white",
                            gridspec_kw={"width_ratios": [1, 1]})
+    # imshow's extent addresses pixel EDGES; x/y are pixel CENTRES. Without the half
+    # pixel the trajectory sits half a pixel off the image it is drawn on - small, but
+    # visible at these crops and exactly the kind of thing a reader tries to interpret.
     ax[0].imshow(crop, cmap="gray", interpolation="nearest",
-                 extent=[x0, x1, y1, y0])
+                 extent=[x0 - 0.5, x1 - 0.5, y1 - 0.5, y0 - 0.5])
     ax[0].plot(x, y, lw=0.8, color="#ffdc00", alpha=0.8, label="gross (raw path)")
     ax[0].plot(cx, cy, lw=2.0, color="#2ecc40", label="directed (coarse path)")
     ax[0].annotate("", xy=(x[-1], y[-1]), xytext=(x[0], y[0]),
@@ -133,9 +142,12 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
         f"directed rate  {row.directed_rate * k:7.3f} {unit}/s",
         f"net rate       {row.net_rate * k:7.3f} {unit}/s",
     ]
-    if not pd.isna(row.get("directed_p", np.nan)):
-        lines += ["", f"permutation p  {row.directed_p:.3f}",
-                  f"directed excess {row.directed_excess * k:6.2f} {unit}"]
+    if not pd.isna(row.get("runs_p", np.nan)):
+        # Labelled as testing runs_total, because that is what it tests - it is NOT
+        # the p-value of the `directed` column above it.
+        lines += ["", f"runs total     {row.runs_total * k:7.2f} {unit}",
+                  f"  permutation p  {row.runs_p:.3f}",
+                  f"  excess over null {row.runs_excess * k:6.2f} {unit}"]
     lines += ["", f"tau = {cfg.tau_directed_seconds:.2f} s "
                   f"({cfg.metrics.tau_directed_frames} frames)"]
     ax[1].axis("off")
@@ -163,7 +175,7 @@ def distance_summary(vesicles, cfg, out_path):
                                               fontsize=12, weight="bold")
     for kl, sub in vesicles.groupby("klass"):
         ax[1].scatter(sub.net * k, sub.directed * k, s=14, alpha=0.75,
-                      color=KLASS_COLOR.get(kl, "#888"), label=kl)
+                      color=klass_color(kl), label=kl)
     lim = max(1e-3, float((vesicles.directed * k).max()))
     ax[1].plot([0, lim], [0, lim], ls="--", lw=1, color="#888")
     ax[1].set_xlabel(f"net ({unit})"); ax[1].set_ylabel(f"directed ({unit})")
@@ -258,7 +270,7 @@ def vesicle_video(stack, track, row, cfg, out_path, pad: int = 24):
     y0 = int(max(0, np.floor(y.min()) - pad)); y1 = int(min(H, np.ceil(y.max()) + pad))
     pos = {int(fr): (xx, yy) for fr, xx, yy in zip(f, x, y)}
     col = tuple(int(c * 255) for c in
-                matplotlib.colors.to_rgb(KLASS_COLOR.get(row.klass, "#ffffff")))
+                matplotlib.colors.to_rgb(klass_color(row.klass)))
     scale = max(1, int(round(160 / max(1, x1 - x0))))
     frames = []
     for t in range(int(f[0]), int(f[-1]) + 1, cfg.render.frame_step):
@@ -289,7 +301,7 @@ def overview_video(stack, tracks, vesicles, cfg, out_path):
     by_frame: dict[int, list] = {}
     for p, d in tracks.groupby("particle"):
         c = tuple(int(v * 255) for v in
-                  matplotlib.colors.to_rgb(KLASS_COLOR.get(kl.get(p, "confined"))))
+                  matplotlib.colors.to_rgb(klass_color(kl.get(p, "confined"))))
         for fr, xx, yy in zip(d.frame.values, d.x.values, d.y.values):
             by_frame.setdefault(int(fr), []).append((xx, yy, c, p))
     hist: dict[int, list] = {}

@@ -6,6 +6,8 @@ import glob
 import sys
 from pathlib import Path
 
+import yaml
+
 from .config import Config
 from .pipeline import analyse, analyse_many
 
@@ -32,7 +34,7 @@ def main(argv=None) -> int:
         over["render.per_vesicle_videos"] = True
     try:
         cfg = Config.load(a.config, **over)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, yaml.YAMLError) as e:
         # A bad parameter is user error, not a bug: say what is wrong and stop,
         # rather than printing a traceback the user has to read backwards.
         print(f"vesicletrack: configuration error: {e}", file=sys.stderr)

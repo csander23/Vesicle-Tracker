@@ -24,9 +24,23 @@ can only shorten a path (triangle inequality), the ordering
 holds for every vesicle at every tau - a useful invariant to assert on new data. If it
 fails, something upstream is wrong.
 
-`directed_runs` additionally splits the coarse steps into directionally persistent runs
-and sums those that clear a minimum, which credits a vesicle making three runs in three
-directions and gives nothing to back-and-forth jiggle.
+TWO FAMILIES OF COLUMNS, AT TWO TIMESCALES. Keep them apart:
+
+    directed        = L(tau_directed_frames), the path at the coarse timescale.
+                      Accompanied by directed_measurable and n_tau_windows.
+    runs_total      = the run-detection metric, computed on coarse steps at the
+                      SHORTER tau_frames. runs_p / runs_z / runs_excess / runs_null
+                      all belong to THIS quantity.
+
+`runs_p` is NOT the p-value of `directed`. They are different metrics on different
+coarsenings, and the columns were originally named directed_p / directed_runs, sitting
+next to `directed` in the output - an arrangement that invited "directed displacement
+was significant (p < 0.05)" written about the wrong number. Both tau values are emitted
+as columns so which is which can always be recovered from the file alone.
+
+`runs_total` splits the coarse steps into directionally persistent runs and sums those
+that clear a minimum, which credits a vesicle making three runs in three directions and
+gives nothing to back-and-forth jiggle.
 
 Significance comes from a PER-VESICLE null: each coarse step keeps its magnitude but is
 given a random heading, i.e. an isotropic walk with that vesicle's exact step-size
@@ -41,16 +55,43 @@ import numpy as np
 import pandas as pd
 
 
-def coarse(x, y, f, tau: int):
-    """Average positions within tau-frame windows. Returns (cx, cy, ct_frames)."""
+def coarse(x, y, f, tau: int, min_occupancy: int | None = None):
+    """Average positions within tau-frame windows. Returns (cx, cy, ct, n_per_window).
+
+    Two things here are deliberate and were not in the first version.
+
+    ABSOLUTE WINDOW GRID. Windows are `f // tau`, not `(f - f[0]) // tau`. Binning
+    relative to each track's own first frame made the result depend on the arbitrary
+    phase of that track against the window grid: the same 400-frame simulated
+    trajectory gave different directed values when started at frame 0, 1, 2, 3 or 4.
+    An absolute grid is shared by every vesicle in the movie, so two identical
+    trajectories score identically no matter when they were first seen.
+
+    OCCUPANCY FLOOR. A window holding one observed frame contributes a raw position
+    with full localisation noise, while a full window contributes a mean with noise
+    suppressed by 1/sqrt(tau) - precisely the asymmetry coarse-graining exists to
+    remove. Worse, it made the metric track detection dropout rather than motion: on
+    purely stationary simulated vesicles, `directed` rose from 0.117 to 0.164 as the
+    observed fraction fell from 1.00 to 0.42, with no change in the underlying motion.
+    Windows with fewer than `min_occupancy` observed frames (default tau // 2) are
+    dropped, so every surviving centroid is averaged over a comparable number of
+    samples. `n_per_window` is returned so callers can see what was kept.
+    """
     f = np.asarray(f, dtype=np.int64)
-    b = (f - f[0]) // tau
-    keep = np.flatnonzero(np.diff(b, prepend=b[0] - 1))
-    edges = np.append(keep, len(f))
-    cx = np.array([x[a:z].mean() for a, z in zip(edges[:-1], edges[1:])])
-    cy = np.array([y[a:z].mean() for a, z in zip(edges[:-1], edges[1:])])
-    ct = np.array([f[a:z].mean() for a, z in zip(edges[:-1], edges[1:])])
-    return cx, cy, ct
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    if min_occupancy is None:
+        min_occupancy = max(1, tau // 2)
+
+    b = f // tau                                    # absolute grid
+    uniq, inv = np.unique(b, return_inverse=True)
+    counts = np.bincount(inv)
+    cx = np.bincount(inv, weights=x) / counts
+    cy = np.bincount(inv, weights=y) / counts
+    ct = np.bincount(inv, weights=f.astype(float)) / counts
+
+    keep = counts >= min_occupancy
+    return cx[keep], cy[keep], ct[keep], counts[keep]
 
 
 def path_at_tau(x, y, f, tau: int) -> float:
@@ -66,7 +107,7 @@ def path_at_tau(x, y, f, tau: int) -> float:
     reason, so check_ordering saw 20 >= 0 >= 0 and passed. NaN makes the gap visible
     and keeps it out of any median.
     """
-    cx, cy, _ = coarse(x, y, f, tau)
+    cx, cy, _, _ = coarse(x, y, f, tau)
     if len(cx) < 2:
         return float("nan")
     return float(np.hypot(np.diff(cx), np.diff(cy)).sum())
@@ -134,6 +175,18 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     m = cfg.metrics
     x, y = np.asarray(x, float), np.asarray(y, float)
     f = np.asarray(f, np.int64)
+
+    # A single non-finite coordinate used to propagate asymmetrically: gross/directed
+    # came back NaN but the run detector returned 0.0 and p = 1.0, so the vesicle was
+    # labelled `confined` - a positive claim about biology derived from corrupt data,
+    # invisible to check_ordering. Mark it invalid instead of guessing.
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.all():
+        return dict(n_frames=int(len(f)), frame_start=int(f[0]), frame_end=int(f[-1]),
+                    n_nonfinite=int((~finite).sum()), invalid=True,
+                    duration_s=float((f[-1] - f[0]) * cfg.dt_seconds) or cfg.dt_seconds,
+                    span_frames=int(f[-1] - f[0] + 1), observed_frames=int(len(f)),
+                    directed_measurable=False)
     dur = float((f[-1] - f[0]) * cfg.dt_seconds) or cfg.dt_seconds
 
     # LIFETIME. span and observed are different numbers whenever the linker bridged a
@@ -159,17 +212,19 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
         "gross": float(np.hypot(np.diff(x), np.diff(y)).sum()),
         "directed": path_at_tau(x, y, f, m.tau_directed_frames),
     }
-    dcx, dcy, _ = coarse(x, y, f, m.tau_directed_frames)
+    dcx, dcy, _, _ = coarse(x, y, f, m.tau_directed_frames)
     out["net_coarse"] = (float(np.hypot(dcx[-1] - dcx[0], dcy[-1] - dcy[0]))
                          if len(dcx) >= 2 else float("nan"))
     # Explicit flag so "not measurable at this tau" is a filterable state rather than
     # something a reader has to infer from a NaN.
     out["directed_measurable"] = bool(len(dcx) >= 2)
     out["n_tau_windows"] = int(len(dcx))
+    out["tau_frames"] = int(m.tau_frames)
+    out["tau_directed_frames"] = int(m.tau_directed_frames)
 
-    cx, cy, _ = coarse(x, y, f, m.tau_frames)
-    nan_keys = ["coarse_path", "directed_runs", "directed_null", "directed_excess",
-                "directed_z", "directed_p", "n_runs", "longest_run", "frac_in_runs",
+    cx, cy, _, _ = coarse(x, y, f, m.tau_frames)
+    nan_keys = ["coarse_path", "runs_total", "runs_null", "runs_excess",
+                "runs_z", "runs_p", "n_runs", "longest_run", "frac_in_runs",
                 "persistence", "max_excursion", "rg", "aniso"]
     if len(cx) < 3:
         out.update({k: np.nan for k in nan_keys})
@@ -181,21 +236,32 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
 
         total, nkept, longest, nsteps = runs(
             steps, m.max_turn_deg, m.min_run_disp_px, m.min_run_steps)
-        out.update(directed_runs=total, n_runs=nkept, longest_run=longest,
+        out.update(runs_total=total, n_runs=nkept, longest_run=longest,
                    frac_in_runs=nsteps / len(steps))
 
         if m.n_permutations > 0:
             null = _null_directed(steps, rng, m.n_permutations, m.max_turn_deg,
                                   m.min_run_disp_px, m.min_run_steps)
             sd = null.std(ddof=1)
-            out["directed_null"] = float(null.mean())
-            out["directed_excess"] = float(total - null.mean())
-            out["directed_z"] = float((total - null.mean()) / sd) if sd > 1e-9 else 0.0
-            out["directed_p"] = float((np.sum(null >= total) + 1) /
-                                      (m.n_permutations + 1))
+            out["runs_null"] = float(null.mean())
+            out["runs_excess"] = float(total - null.mean())
+            # A null with NO spread is the case of MAXIMUM evidence, not of no
+            # evidence. Reporting z = 0.0 there (the value meaning "indistinguishable
+            # from the null") systematically discarded the cleanest movers: a steady
+            # drift scored runs_p = 0.005 and z = 0.0 simultaneously.
+            if not np.isfinite(sd):
+                out["runs_z"] = float("nan")            # fewer than 2 permutations
+            elif sd > 1e-9:
+                out["runs_z"] = float((total - null.mean()) / sd)
+            elif total > null.mean():
+                out["runs_z"] = float("inf")
+            else:
+                out["runs_z"] = 0.0
+            out["runs_p"] = float((np.sum(null >= total) + 1) /
+                                  (m.n_permutations + 1))
         else:
-            out.update(directed_null=np.nan, directed_excess=np.nan,
-                       directed_z=np.nan, directed_p=np.nan)
+            out.update(runs_null=np.nan, runs_excess=np.nan,
+                       runs_z=np.nan, runs_p=np.nan)
 
         ok = mags > 1e-9
         if ok.sum() >= 2:
@@ -219,12 +285,27 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     else:
         out["censored_start"] = out["censored_end"] = out["is_censored"] = False
 
+    out["invalid"] = False
+    out["n_nonfinite"] = 0
     st = np.hypot(np.diff(x), np.diff(y))
     out["max_step"] = float(st.max()) if len(st) else 0.0
     out["n_big_steps"] = int((st > cfg.classify.big_step_px).sum())
     for k in ("net", "gross", "directed"):
         out[f"{k}_rate"] = out[k] / dur
     return out
+
+
+EMPTY_SCHEMA = [
+    "particle", "klass", "observed_frames", "span_frames", "observed_s", "span_s",
+    "frac_observed", "is_censored", "net", "gross", "directed",
+    "directed_measurable", "runs_total", "runs_p", "n_frames", "frame_start",
+    "frame_end", "duration_s", "missing_frames", "n_gaps", "longest_gap",
+    "net_coarse", "coarse_path", "runs_null", "runs_excess", "runs_z", "n_runs",
+    "longest_run", "frac_in_runs", "persistence", "max_excursion", "rg", "aniso",
+    "max_step", "n_big_steps", "net_rate", "gross_rate", "directed_rate",
+    "censored_start", "censored_end", "invalid", "n_nonfinite",
+    "n_tau_windows", "tau_frames", "tau_directed_frames", "x0", "y0",
+]
 
 
 def score_tracks(tracks: pd.DataFrame, cfg,
@@ -235,18 +316,37 @@ def score_tracks(tracks: pd.DataFrame, cfg,
     suspect tracks are all scored and labelled so they can be filtered downstream on
     evidence rather than disappearing upstream on a threshold.
     """
-    rng = np.random.default_rng(cfg.metrics.random_seed)
     rows = []
+    dup = tracks.duplicated(subset=["particle", "frame"]).sum()
+    if dup:
+        raise ValueError(
+            f"{dup} duplicate (particle, frame) row(s) in the track table. Duplicates "
+            "inflate gross path and max_step and flip vesicles to `excluded`; they "
+            "indicate a merge that did not average coincident frames.")
     for p, d in tracks.groupby("particle", sort=True):
         d = d.sort_values("frame")
+        # Seed PER TRACK. A single shared generator made each vesicle's null - and so
+        # its p-value and its class - depend on how many vesicles happened to be
+        # scored before it, meaning a track could change class simply because another
+        # track was added to the movie.
+        rng = np.random.default_rng([cfg.metrics.random_seed, int(p)])
         rec = metrics_for_track(d.x.values, d.y.values, d.frame.values, cfg, rng,
                                 n_movie_frames=n_movie_frames)
         rec["particle"] = int(p)
         rec["x0"], rec["y0"] = float(d.x.iloc[0]), float(d.y.iloc[0])
         rows.append(rec)
     if not rows:
-        return pd.DataFrame()
+        # An empty frame WITH the schema. A bare DataFrame() has no columns, so
+        # check_ordering raised AttributeError on a movie with no vesicles, and
+        # pd.concat of per-movie tables silently produced all-NaN columns.
+        return pd.DataFrame(columns=EMPTY_SCHEMA)
     df = pd.DataFrame(rows)
+    # Invalid tracks return a short record, so guarantee the full schema before
+    # anything downstream indexes into it. Missing entries become NaN, which is the
+    # honest value for a metric that could not be computed.
+    for c in EMPTY_SCHEMA:
+        if c not in df.columns:
+            df[c] = np.nan
     df = classify(df, cfg)
     if cfg.um_per_px:
         for c in ("net", "net_coarse", "gross", "directed", "coarse_path",
@@ -259,7 +359,8 @@ def score_tracks(tracks: pd.DataFrame, cfg,
             df[f"{c}_um_s"] = df[c] * cfg.um_per_px
     front = ["particle", "klass", "observed_frames", "span_frames", "observed_s",
              "span_s", "frac_observed", "is_censored",
-             "net", "gross", "directed", "directed_p"]
+             "net", "gross", "directed", "directed_measurable",
+             "runs_total", "runs_p"]
     return df[front + [c for c in df.columns if c not in front]]
 
 
@@ -272,15 +373,23 @@ def classify(df: pd.DataFrame, cfg) -> pd.DataFrame:
     """
     c = cfg.classify
     df = df.copy()
-    excluded = (df.max_step > c.exclude_max_step_px) | \
-               (df.n_big_steps >= c.exclude_n_big_steps)
+    def col(name, default):
+        """Invalid tracks return a short record, so not every column is guaranteed."""
+        return (df[name] if name in df.columns
+                else pd.Series(default, index=df.index))
+
+    invalid = col("invalid", False).fillna(False).astype(bool)
+    excluded = ((col("max_step", 0.0) > c.exclude_max_step_px) |
+                (col("n_big_steps", 0) >= c.exclude_n_big_steps)).fillna(False)
     if c.use_permutation:
-        moving = (df.directed_p <= c.p_threshold) & (df.net >= c.mover_min_net_px)
-        moving = moving.fillna(False)
+        moving = ((col("runs_p", np.nan) <= c.p_threshold)
+                  & (col("net", np.nan) >= c.mover_min_net_px)).fillna(False)
     else:
-        moving = (df.net_rate >= c.mover_rate_px_per_s) & (df.net >= c.mover_min_net_px)
-    df["klass"] = np.where(excluded, "excluded",
-                           np.where(moving.fillna(False), "mover", "confined"))
+        moving = ((col("net_rate", np.nan) >= c.mover_rate_px_per_s)
+                  & (col("net", np.nan) >= c.mover_min_net_px)).fillna(False)
+    df["klass"] = np.where(invalid, "invalid",
+                           np.where(excluded, "excluded",
+                                    np.where(moving, "mover", "confined")))
     return df
 
 
@@ -291,6 +400,9 @@ def check_ordering(df: pd.DataFrame, tol: float = 1e-6) -> pd.DataFrame:
     means coarse-graining lengthened a path, which is geometrically impossible, so the
     cause is upstream: duplicated frames, unsorted tracks, or NaNs.
     """
+    if not len(df) or "gross" not in df.columns:
+        return pd.DataFrame(columns=["particle", "gross", "directed",
+                                     "net_coarse", "net"])
     d = df.dropna(subset=["gross", "directed", "net_coarse"])
     bad = d[(d.gross + tol < d.directed) | (d.directed + tol < d.net_coarse)]
     return bad[["particle", "gross", "directed", "net_coarse", "net"]]

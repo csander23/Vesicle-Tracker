@@ -153,8 +153,17 @@ See the [README](../README.md) for why the first two are not enough.
 | `max_turn_deg` | 60 | ° | A step turning more than this ends a run. |
 | `min_run_disp_px` | 1.0 | px | Runs shorter than this are not counted as transport. |
 | `min_run_steps` | 2 | steps | A run must persist ≥ 2 coarse steps. **Must be ≥ 2** — `1` collapses `directed` onto plain path length and the metric loses all contrast against the null. Validation rejects it. |
-| `n_permutations` | 200 | | Per-vesicle null. `p` floors at `1/(n+1)`, so 200 → smallest possible p is 0.005. `0` disables the p-value. |
+| `n_permutations` | 200 | | Per-vesicle null. `p` floors at `1/(n+1)`, so 200 → smallest possible p is 0.005. `0` disables the p-value. Validation rejects a `p_threshold` below that floor, which would make `mover` unreachable. |
 | `random_seed` | 0 | | Affects **only** the null, never the measurement. |
+
+> **Two metric families, two timescales — do not mix them up.**
+> `directed` = L(`tau_directed_frames`), the coarse path. `runs_total` = the
+> run-detection metric on coarse steps at the shorter `tau_frames`, and
+> **`runs_p` / `runs_z` / `runs_excess` belong to `runs_total`, not to `directed`.**
+> These were originally named `directed_p` / `directed_runs` and sat beside `directed`
+> in the output, which invited "directed displacement was significant (p < 0.05)"
+> written about a different number. Both τ values are emitted as columns so the file
+> is self-describing.
 
 > **Choosing τ.** τ = 4 s was chosen against simulated ground truth: it recovers 86% of
 > a known 5 px directed run against a pure-noise floor of 2.6 px. Scale both τ values

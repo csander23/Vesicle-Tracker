@@ -196,6 +196,11 @@ class Config:
             if sub is None:
                 kwargs[key] = val
             else:
+                if not isinstance(val, dict) and val is not None:
+                    raise ValueError(
+                        f"config section {key!r} must be a mapping of settings, got "
+                        f"{type(val).__name__}: {val!r}. To turn a stage off use its "
+                        f"own flag, e.g. `{key}:\n  enabled: false`.")
                 known = {f.name for f in dataclasses.fields(sub)}
                 bad = set(val or {}) - known
                 if bad:
@@ -244,8 +249,47 @@ class Config:
 
     # ------------------------------------------------------------- validation
     def validate(self) -> None:
+        # Types first. A NaN passes every inequality below (all comparisons with NaN
+        # are False), and a numpy scalar survives the whole run only to break
+        # yaml.safe_dump at save time - after the analysis has been paid for.
+        import math
+        for name, val in (("dt_seconds", self.dt_seconds),
+                          ("um_per_px", self.um_per_px)):
+            if val is None:
+                continue
+            if not isinstance(val, (int, float)) or isinstance(val, bool):
+                raise ValueError(f"{name} must be a plain number, got "
+                                 f"{type(val).__name__}: {val!r}")
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(f"{name} must be finite, got {val!r}")
+        if self.dt_seconds is None:
+            raise ValueError("dt_seconds is required and must be > 0")
         if self.dt_seconds <= 0:
             raise ValueError("dt_seconds must be > 0")
+        for name, val in (("metrics.tau_frames", self.metrics.tau_frames),
+                          ("metrics.tau_directed_frames",
+                           self.metrics.tau_directed_frames)):
+            if not isinstance(val, int) or val < 1:
+                raise ValueError(f"{name} must be an integer >= 1, got {val!r}. "
+                                 "0 collapses every track to one window and makes "
+                                 "`directed` undefined.")
+        if self.drift.reference_frames < 1:
+            raise ValueError(
+                f"drift.reference_frames must be >= 1, got "
+                f"{self.drift.reference_frames}. 0 silently disables drift "
+                "correction and a negative value means 'all but the last N', "
+                "neither of which is ever intended.")
+        # The permutation p-value cannot go below 1/(n+1). A threshold under that
+        # floor makes `mover` unreachable for every vesicle, silently.
+        floor = 1.0 / (self.metrics.n_permutations + 1)
+        if (self.classify.use_permutation
+                and self.classify.p_threshold < floor):
+            raise ValueError(
+                f"classify.p_threshold={self.classify.p_threshold} is below the "
+                f"permutation floor 1/(n_permutations+1)={floor:.4f}, so no vesicle "
+                f"can ever be classified a mover. Raise the threshold or raise "
+                f"metrics.n_permutations to at least "
+                f"{int(round(1 / self.classify.p_threshold)) - 1}.")
         if self.um_per_px is not None and self.um_per_px <= 0:
             raise ValueError("um_per_px must be > 0 or null")
         if self.detect.method != "dao":

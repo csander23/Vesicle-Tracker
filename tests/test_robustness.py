@@ -198,7 +198,7 @@ def test_permutations_off(movie):
     r = analyse(movie, base_cfg(**{"metrics.n_permutations": 0,
                                    "classify.use_permutation": False}),
                 verbose=False)
-    assert r.vesicles.directed_p.isna().all()
+    assert r.vesicles.runs_p.isna().all()
     assert int(r.counts().get("mover", 0)) > 0      # rate rule still classifies
 
 
@@ -267,7 +267,7 @@ def test_seed_changes_only_the_null(movie):
     a = analyse(movie, base_cfg(**{"metrics.random_seed": 0}), verbose=False).vesicles
     b = analyse(movie, base_cfg(**{"metrics.random_seed": 7}), verbose=False).vesicles
     np.testing.assert_allclose(a.directed, b.directed)      # measurement is fixed
-    assert not np.allclose(a.directed_null, b.directed_null)
+    assert not np.allclose(a.runs_null, b.runs_null)
 
 
 # --------------------------------------------------------------- json config
@@ -322,3 +322,135 @@ def test_cli_accepts_json_config(tmp_path, movie):
         env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")})
     assert out.returncode == 0, out.stderr
     assert (tmp_path / "o" / "batch_summary.csv").exists()
+
+
+# ------------------------------------------------- regressions from the audit
+def test_directed_does_not_depend_on_when_the_track_started(movie):
+    """Absolute window grid: the same trajectory must score the same whenever it began.
+
+    Binning relative to each track's own first frame made `directed` depend on the
+    arbitrary phase against the window grid - the same trajectory gave 0.000 at one
+    length and 4.550 one frame later.
+    """
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
+                      "filters.min_observed_frames": 80})
+    vals = []
+    for start in range(5):
+        f = np.arange(start, start + 400)
+        m = M.metrics_for_track(np.linspace(0, 20, 400), np.zeros(400), f, cfg,
+                                np.random.default_rng(0))
+        vals.append(m["directed"])
+    assert max(vals) - min(vals) < 0.05 * np.mean(vals)
+
+
+def test_sparse_windows_do_not_inflate_directed():
+    """Occupancy floor: a window holding one frame carries full localisation noise."""
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
+                      "filters.min_observed_frames": 80})
+    rng = np.random.default_rng(3)
+    f_full = np.arange(400)
+    x = rng.normal(0, 0.15, 400); y = rng.normal(0, 0.15, 400)   # stationary
+    full = M.metrics_for_track(x, y, f_full, cfg, np.random.default_rng(0))["directed"]
+    keep = np.sort(rng.choice(400, 168, replace=False))          # 42% observed
+    sparse = M.metrics_for_track(x[keep], y[keep], f_full[keep], cfg,
+                                 np.random.default_rng(0))["directed"]
+    assert sparse < 2.5 * full, (full, sparse)
+
+
+def test_degenerate_null_reports_infinite_z_not_zero():
+    """A null with no spread is MAXIMUM evidence, not none."""
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
+                      "filters.min_observed_frames": 80})
+    f = np.arange(200)
+    m = M.metrics_for_track(f * 0.006, np.zeros(200), f, cfg, np.random.default_rng(0))
+    floor = 1.0 / (cfg.metrics.n_permutations + 1)
+    assert m["runs_p"] == pytest.approx(floor)   # nothing in the null ever beat it
+    assert np.isinf(m["runs_z"]) and m["runs_z"] > 0
+
+
+def test_nonfinite_coordinate_is_invalid_not_confined():
+    """A NaN must not yield a confident biological label."""
+    import numpy as np
+    import pandas as pd
+    from vesicletrack import metrics as M
+    cfg = base_cfg()
+    x = np.linspace(0, 10, 200); x[57] = np.nan
+    tr = pd.DataFrame({"particle": 0, "frame": np.arange(200), "x": x, "y": 0.0})
+    v = M.score_tracks(tr, cfg, n_movie_frames=400)
+    assert v.klass.iloc[0] == "invalid"
+    assert bool(v.invalid.iloc[0]) and int(v.n_nonfinite.iloc[0]) == 1
+
+
+def test_pvalue_does_not_depend_on_other_tracks_in_the_table():
+    """Per-track RNG: a vesicle's class must not change because a neighbour exists."""
+    import numpy as np
+    import pandas as pd
+    from vesicletrack import metrics as M
+    cfg = base_cfg()
+    solo = pd.DataFrame({"particle": 7, "frame": np.arange(200),
+                         "x": np.arange(200) * 0.006, "y": 0.0})
+    pair = pd.concat([pd.DataFrame({"particle": 1, "frame": np.arange(200),
+                                    "x": 0.0, "y": 0.0}), solo])
+    a = M.score_tracks(solo, cfg).set_index("particle").runs_p[7]
+    b = M.score_tracks(pair, cfg).set_index("particle").runs_p[7]
+    assert a == b
+
+
+def test_duplicate_particle_frame_rows_are_refused():
+    import pandas as pd
+    import numpy as np
+    from vesicletrack import metrics as M
+    tr = pd.DataFrame({"particle": [0, 0], "frame": [1, 1], "x": [1.0, 2.0],
+                       "y": [0.0, 0.0]})
+    with pytest.raises(ValueError, match="duplicate"):
+        M.score_tracks(tr, base_cfg())
+
+
+def test_empty_result_keeps_its_schema():
+    import pandas as pd
+    from vesicletrack import metrics as M
+    v = M.score_tracks(pd.DataFrame(columns=["particle", "frame", "x", "y"]),
+                       base_cfg())
+    assert "gross" in v.columns and "runs_p" in v.columns
+    assert len(M.check_ordering(v)) == 0        # must not raise
+
+
+def test_zstack_is_refused_by_its_own_metadata(tmp_path):
+    """A z-stack has the same 3-D shape as a time series; the file says which it is."""
+    import numpy as np
+    import tifffile
+    p = tmp_path / "zstack.tif"
+    tifffile.imwrite(p, np.zeros((12, 64, 64), np.uint16),
+                     metadata={"axes": "ZYX"}, imagej=True)
+    with pytest.raises(ValueError, match="not time"):
+        vio.load_stack(p)
+
+
+def test_config_rejects_unreachable_p_threshold():
+    with pytest.raises(ValueError, match="permutation floor"):
+        Config.load(None, **{"classify.p_threshold": 0.001,
+                             "metrics.n_permutations": 200})
+
+
+def test_config_rejects_nan_and_scalar_sections(tmp_path):
+    with pytest.raises(ValueError, match="finite"):
+        Config.load(None, **{"dt_seconds": float("nan")})
+    p = tmp_path / "s.yaml"
+    p.write_text("drift: false\n")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        Config.load(p)
+
+
+def test_render_false_writes_no_figures(movie, tmp_path):
+    r = analyse(movie, base_cfg(**{"render.three_panel": True,
+                                   "render.per_vesicle_images": True}),
+                name="nr", verbose=False)
+    r.save(tmp_path, render=False)
+    assert not list((tmp_path / "nr").glob("*.png"))
+    assert not (tmp_path / "nr" / "vesicles").exists()

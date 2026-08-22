@@ -47,9 +47,10 @@ def test_ordering_invariant_holds(result):
 
 
 def test_movers_separate_from_confined(result):
+    """runs_p tests runs_total, NOT the `directed` column it used to sit beside."""
     v = result.vesicles
-    assert v[v.klass == "mover"].directed_p.max() < 0.05
-    assert v[v.klass == "confined"].directed_p.median() > 0.5
+    assert v[v.klass == "mover"].runs_p.max() < 0.05
+    assert v[v.klass == "confined"].runs_p.median() > 0.5
 
 
 def test_gross_is_noise_dominated(result):
