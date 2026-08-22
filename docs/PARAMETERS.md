@@ -63,8 +63,83 @@ were the vesicles found, and was anything invented?
 |---|---|---|---|
 | `search_range_px` | 3.0 | px | Max frame-to-frame displacement. **Too large is the dangerous direction** — it invites identity swaps between neighbours. |
 | `memory_frames` | 15 | frames | How long a vesicle may vanish (blink, defocus) and still be relinked to the same identity. |
-| `min_length_frames` | 40 | frames | Shorter tracks are dropped: too few frames to measure direction. Should exceed `metrics.tau_frames`. |
-| `merge_radius_px` | 4.0 | px | Tracks whose mean positions sit this close are treated as one vesicle the linker split at a dropout. `0` disables. |
+| `min_length_frames` | 3 | frames | **Hard floor only** — below this no metric exists at all (a 2-frame track has one step). The scientific length cut is `filters.min_observed_frames`, which labels instead of deleting. |
+| `merge_radius_px` | 4.0 | px | End-to-start distance allowed when rejoining a fragment. `0` disables merging. |
+| `merge_max_gap_frames` | 15 | frames | **The "look back" window.** How long after losing a vesicle the tracker may still rejoin a new fragment to it. |
+| `merge_overlap_tolerance` | 2 | frames | Overlap still treated as one vesicle. Fragments that genuinely coexist are different vesicles and are never merged. |
+
+> **Why merging is conservative.** The obvious implementation joins tracks whose *mean*
+> positions are close. That fuses two **different** vesicles that occupied the same spot
+> at different times — on real data it produced tracks with 120-frame gaps under a
+> `memory` of 15, silently inflating lifetimes. A merge now requires temporal
+> disjointness, a short gap, and proximity **at the junction**, not on average.
+
+## `size` — how big each vesicle is
+
+Intensity-weighted second moment of a window around each spot: fast (vectorised per
+frame) and within a few percent of a Gaussian fit for well-separated spots.
+
+| parameter | default | unit | what it does |
+|---|---|---|---|
+| `enabled` | `true` | | Turn sizing off to save time. |
+| `window_px` | 4 | px | Half-width of the measurement window (4 → 9×9). Too large pulls in neighbours; too small truncates the spot. |
+| `psf_sigma_px` | `null` | px | PSF width to deconvolve. **`null` calibrates it from this movie** — recommended. |
+| `psf_from_percentile` | 5.0 | % | When calibrating, which percentile of measured widths counts as "a point source". |
+| `max_frames` | 200 | frames | Frames sampled per track. More buys no precision. |
+
+> **Read this before quoting a size.** A vesicle is below the diffraction limit, so what
+> the microscope records is mostly the PSF. Three columns come out:
+> `sigma_px` (measured, includes PSF), `sigma_deconv_px` (excess over the PSF), and
+> `at_diffraction_limit` (True when the object is unresolved — deconvolved size is then
+> `0`, not NaN, because "unresolved" is a real state, not missing data).
+>
+> **There is a noise floor.** The second moment is biased upward by noise. Measured on
+> this pipeline: synthetic point sources with a true size of **zero** report
+> σ = 1.394 px and 0.41 px of deconvolved "size"; real Rab5 endosomes at the same
+> settings give σ = 2.010 px and 0.99 px. Treat ~0.4 px of deconvolved width as
+> indistinguishable from zero, and recalibrate that floor for your own optics with
+> sub-resolution beads or `examples/make_synthetic.py`.
+>
+> **Prefer `sigma_px` for comparisons.** Between conditions imaged identically the PSF
+> contribution is common, so a difference in raw σ is real and needs no deconvolution.
+
+## `filters` — which vesicles count
+
+**Filters label; they never delete.** Every vesicle is written to `vesicles_all.csv`
+with `passes_filter` and `filter_reason`; the passing subset also goes to
+`vesicles_filtered.csv`. Any threshold can be re-derived later from the `all` file, so
+a filter is a reversible, auditable choice rather than lost data. `null` = rule off.
+
+| parameter | default | what it does |
+|---|---|---|
+| `min_observed_frames` | 180 | Frames actually **detected** (not span). Must be ≥ `2 × tau_directed_frames`. |
+| `max_observed_frames` | `null` | Upper bound on detected frames. |
+| `min_lifetime_s` | `null` | On **span** — first to last sighting. |
+| `max_lifetime_s` | `null` | Upper bound on span. **See the bias warning below.** |
+| `min_frac_observed` | 0.0 | Rejects tracks that are mostly gap (`0.5` = at least half the span seen). |
+| `max_longest_gap` | `null` | Longest single dropout allowed, in frames. |
+| `exclude_censored` | `false` | Drop tracks touching the first or last frame. |
+| `exclude_classes` | `[excluded]` | `excluded` = suspected identity swap; a tracking judgement, not biology. |
+| `rois` | `[]` | Keep only these regions, e.g. `[soma]`. Empty keeps all, including `outside`. |
+| `min_sigma_px` / `max_sigma_px` | `null` | Size bounds. |
+
+> **`directed` needs two τ-windows to exist.** A track shorter than
+> `2 × tau_directed_frames` spans under two coarse windows, so no coarse path can be
+> formed and `directed` comes back **NaN**, flagged `directed_measurable = False`.
+> Earlier this returned `0.0`, which was silently wrong — a vesicle travelling 20 px in
+> a straight line over 60 frames reported `directed = 0.00` while `net` said `20.00`,
+> and because `net_coarse` was 0 too the ordering check passed. Config validation now
+> warns when the length filter admits tracks that cannot be scored.
+
+> **`max_lifetime_s` selects for tracking failure.** An upper bound on lifetime
+> preferentially keeps tracks the tracker *lost* early — it does not select for
+> short-lived biology. Use it only with a reason, and check the censored fraction.
+
+> **Censoring.** A vesicle already present in frame 0, or still present in the last
+> frame, has a lifetime whose end was never observed. Pooling those with complete
+> observations biases mean lifetime **downward**. They are flagged `is_censored`,
+> `censored_start`, `censored_end` — on a 400-frame crop of real data nearly every
+> long-lived vesicle is censored, so check this before quoting a mean lifetime.
 
 ## `metrics` — movement
 

@@ -39,20 +39,34 @@ def main(argv=None) -> int:
         return 2
 
     files: list[str] = []
+    missing: list[str] = []
     for pat in a.inputs:
         hits = sorted(glob.glob(pat))
-        files.extend(hits if hits else [pat])
-    files = [f for f in files if Path(f).exists()]
-    if not files:
-        ap.error("no input files matched")
+        if hits:
+            files.extend(hits)
+        elif Path(pat).exists():
+            files.append(pat)
+        else:
+            missing.append(pat)
+    # A mistyped path must not be silently dropped: reporting success on a subset of
+    # what was asked for is how a batch quietly analyses the wrong set of movies.
+    if missing:
+        print("vesicletrack: no such file(s): " + ", ".join(missing), file=sys.stderr)
+        if not files:
+            return 2
 
     df = analyse_many(files, cfg, output_dir=a.output, verbose=not a.quiet)
     out = Path(a.output or cfg.output_dir) / "batch_summary.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
+    n_fail = int(df["error"].notna().sum()) if "error" in df else 0
     if not a.quiet:
-        print(f"\n{len(df)} movie(s) -> {out}")
-    return 0
+        print(f"\n{len(df)} movie(s) -> {out}"
+              + (f"   ({n_fail} FAILED)" if n_fail else ""))
+    # Exit non-zero if anything failed, so a CI job or a shell loop notices.
+    if n_fail == len(df) and len(df):
+        return 1
+    return 3 if (n_fail or missing) else 0
 
 
 if __name__ == "__main__":

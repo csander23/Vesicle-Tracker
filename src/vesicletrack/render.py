@@ -227,13 +227,22 @@ def _write_video(frames, out_path, fps, exe):
     cmd = [exe, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264",
            "-pix_fmt", "yuv420p", str(out_path)]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    for f in frames:
-        if f.ndim == 2:
-            f = np.repeat(f[:, :, None], 3, axis=2)
-        p.stdin.write(f.astype(np.uint8).tobytes())
-    p.stdin.close()
-    p.wait()
+    # A present-but-broken ffmpeg raises BrokenPipeError mid-write. That must not kill
+    # save() after the whole analysis has already run - the tables are the valuable
+    # output and they are already on disk.
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        for f in frames:
+            if f.ndim == 2:
+                f = np.repeat(f[:, :, None], 3, axis=2)
+            p.stdin.write(f.astype(np.uint8).tobytes())
+        p.stdin.close()
+        p.wait()
+    except (BrokenPipeError, OSError) as e:
+        print(f"vesicletrack: ffmpeg failed ({type(e).__name__}: {e}); "
+              f"skipping {out_path.name}. Tables and images are unaffected.",
+              flush=True)
+        return None
     return out_path if out_path.exists() else None
 
 
@@ -290,7 +299,10 @@ def overview_video(stack, tracks, vesicles, cfg, out_path):
         for xx, yy, c, p in by_frame.get(t, []):
             h = hist.setdefault(p, [])
             h.append((xx, yy))
-            del h[:-cfg.render.trail_frames]
+            if cfg.render.trail_frames > 0:
+                del h[:-cfg.render.trail_frames]
+            else:
+                del h[:-1]          # 0 means no trail, not an infinite one
             for (ax_, ay_), (bx_, by_) in zip(h[:-1], h[1:]):
                 cv2.line(rgb, (int(ax_), int(ay_)), (int(bx_), int(by_)), c, 1,
                          cv2.LINE_AA)

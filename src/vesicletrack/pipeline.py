@@ -27,11 +27,58 @@ import pandas as pd
 
 from .config import Config
 from . import detect as _detect
+from . import filters as _filters
 from . import io as _io
 from . import linking as _link
 from . import metrics as _metrics
 from . import preprocess as _pre
 from . import render as _render
+from . import roi as _roi
+from . import size as _size
+
+
+def measure_track_sizes(stack: np.ndarray, tracks: pd.DataFrame, cfg) -> pd.DataFrame:
+    """Per-track size, measured on a sample of each track's own frames.
+
+    Frames are sampled evenly within each track (cap: size.max_frames) and then grouped
+    BY FRAME, so every spot in a frame is measured in one vectorised call rather than
+    one call per spot. Sizing all 1350 frames of a long track buys no precision that
+    200 evenly spaced frames do not already give.
+    """
+    if not cfg.size.enabled or not len(tracks):
+        return pd.DataFrame(columns=["particle"])
+    cap = max(1, int(cfg.size.max_frames))
+    picks = []
+    for p, d in tracks.groupby("particle", sort=False):
+        d = d.sort_values("frame")
+        idx = (np.linspace(0, len(d) - 1, min(cap, len(d))).round().astype(int)
+               if len(d) > cap else np.arange(len(d)))
+        picks.append(d.iloc[np.unique(idx)])
+    sel = pd.concat(picks, ignore_index=True)
+
+    per_frame = []
+    for fr, d in sel.groupby("frame", sort=True):
+        sz = _size.measure_frame(stack[int(fr)], d.x.values, d.y.values, cfg)
+        sz["particle"] = d.particle.values
+        per_frame.append(sz)
+    allsz = pd.concat(per_frame, ignore_index=True)
+
+    psf = cfg.effective_psf_sigma
+    if psf is None:
+        psf = _size.estimate_psf_sigma(allsz.sigma_px.values,
+                                       cfg.size.psf_from_percentile)
+    rows = []
+    for p, d in allsz.groupby("particle", sort=True):
+        rec = _size.summarise_track(d, cfg)
+        rec["particle"] = int(p)
+        rows.append(rec)
+    out = pd.DataFrame(rows)
+    dec, lim = _size.deconvolve(out.sigma_px.values, psf)
+    out["sigma_deconv_px"] = dec
+    out["at_diffraction_limit"] = lim
+    out["psf_sigma_used_px"] = psf
+    out["fwhm_px"] = out.sigma_px * 2.3548200450309493
+    return out
 
 
 @dataclass
@@ -42,6 +89,8 @@ class Result:
     vesicles: pd.DataFrame
     summary: dict
     stack: np.ndarray | None = field(default=None, repr=False)
+    roi_labels: np.ndarray | None = field(default=None, repr=False)
+    roi_names: list = field(default_factory=list)
 
     # ------------------------------------------------------------- summaries
     def counts(self) -> pd.Series:
@@ -52,6 +101,13 @@ class Result:
     def movers(self) -> pd.DataFrame:
         return self.vesicles[self.vesicles.klass == "mover"]
 
+    @property
+    def filtered(self) -> pd.DataFrame:
+        """The subset passing the configured filters. `.vesicles` keeps everything."""
+        if "passes_filter" not in self.vesicles:
+            return self.vesicles
+        return self.vesicles[self.vesicles.passes_filter]
+
     def check(self) -> pd.DataFrame:
         """Vesicles violating gross >= directed >= net. Should be empty."""
         return _metrics.check_ordering(self.vesicles)
@@ -60,12 +116,36 @@ class Result:
     def save(self, output_dir=None, render: bool | None = None) -> dict:
         cfg = self.config
         out = Path(output_dir or cfg.output_dir) / self.name
+        # Two movies with the same stem in different folders would otherwise write to
+        # the same directory and the second would overwrite the first, silently.
+        if out.exists() and (out / "summary.json").exists():
+            try:
+                prev = json.loads((out / "summary.json").read_text()).get("source")
+            except Exception:
+                prev = None
+            if prev and prev != self.summary.get("source"):
+                raise FileExistsError(
+                    f"{out} already holds results for a DIFFERENT movie ({prev}). "
+                    f"Two inputs share the stem {self.name!r}. Pass name=... to "
+                    "analyse(), or use distinct output directories.")
         out.mkdir(parents=True, exist_ok=True)
+        # Stale per-vesicle figures from a previous parameter set would otherwise sit
+        # beside the new tables and be read as belonging to them.
+        for sub in ("vesicles", "vesicle_videos"):
+            d = out / sub
+            if d.exists():
+                for f in d.glob("*"):
+                    f.unlink()
         written: dict = {}
 
         cfg.save(out / "config_used.yaml")
         written["tracks"] = _io.save_table(self.tracks, out / "tracks.parquet")
-        written["vesicles"] = _io.save_table(self.vesicles, out / "vesicles.csv")
+        # Two lists per video, as asked: everything, and the usable subset. The `all`
+        # file is the one to keep - any filter can be re-derived from it later.
+        written["vesicles_all"] = _io.save_table(self.vesicles,
+                                                 out / "vesicles_all.csv")
+        written["vesicles_filtered"] = _io.save_table(self.filtered,
+                                                      out / "vesicles_filtered.csv")
         (out / "summary.json").write_text(json.dumps(self.summary, indent=2,
                                                      default=str))
         written["summary"] = out / "summary.json"
@@ -116,10 +196,19 @@ class Result:
 
 
 def analyse(path, config: Config | None = None, *, name: str | None = None,
-            mask: np.ndarray | None = None, channel: int | None = None,
+            rois=None, mask: np.ndarray | None = None, channel: int | None = None,
             z_project: str | None = None, keep_stack: bool = True,
-            progress=None, verbose: bool = True) -> Result:
-    """Run the full pipeline on one movie."""
+            progress=None, verbose: bool = True, **meta) -> Result:
+    """Run the full pipeline on one movie.
+
+    rois    ROI source (see roi.load_rois): ImageJ .roi/.zip, label or mask image,
+            array, or {name: polygon}. Vesicles are LABELLED by region; those outside
+            every region are kept and labelled "outside", not discarded.
+    mask    legacy: a boolean array restricting DETECTION. Prefer `rois`, which keeps
+            the outside population instead of deleting it.
+    **meta  extra columns to stamp on every row (batch=, group=, genotype=, ...) so
+            results from many movies can be pooled without re-parsing filenames.
+    """
     cfg = config or Config()
     cfg.validate()
     path = Path(path)
@@ -133,6 +222,10 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     stack = _io.load_stack(path, channel=channel, z_project=z_project)
     say(f"{name}: {stack.shape[0]} frames, {stack.shape[2]}x{stack.shape[1]} px")
 
+    roi_labels, roi_names = _roi.load_rois(rois, stack.shape[1:])
+    if mask is None and roi_names and getattr(cfg, "restrict_detection_to_rois", False):
+        mask = roi_labels > 0
+
     stack_c, shifts, span = _pre.correct_drift(stack, cfg)
     if cfg.drift.enabled:
         say(f"  drift {span:.2f} px" + ("  (below threshold, not applied)"
@@ -145,9 +238,31 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     tracks = _link.link(spots, cfg)
     n_ves = tracks.particle.nunique() if len(tracks) else 0
     say(f"  {n_ves} vesicles after linking "
-        f"(min {cfg.link.min_length_frames} frames)")
+        f"(hard floor {cfg.link.min_length_frames} frames)")
 
-    vesicles = _metrics.score_tracks(tracks, cfg)
+    vesicles = _metrics.score_tracks(tracks, cfg, n_movie_frames=len(stack_c))
+
+    if len(vesicles) and cfg.size.enabled:
+        sz = measure_track_sizes(stack_c, tracks, cfg)
+        if len(sz):
+            vesicles = vesicles.merge(sz, on="particle", how="left")
+            say(f"  size: median sigma {vesicles.sigma_px.median():.2f} px "
+                f"(PSF used {sz.psf_sigma_used_px.iloc[0]:.2f}, "
+                f"{int(vesicles.at_diffraction_limit.sum())} unresolved)")
+
+    if len(vesicles):
+        ass = _roi.assign_tracks(tracks, roi_labels, roi_names)
+        vesicles = vesicles.merge(ass, on="particle", how="left")
+        if roi_names:
+            say(f"  roi: " + ", ".join(
+                f"{k}={v}" for k, v in vesicles.roi.value_counts().items()))
+
+    for k, v in meta.items():
+        vesicles[k] = v
+    vesicles = _filters.apply_filters(vesicles, cfg)
+    fsum = _filters.filter_summary(vesicles)
+    say(f"  filters: {fsum['n_pass']}/{fsum['n_all']} pass"
+        + (f"  (failed: {fsum['reasons']})" if fsum["reasons"] else ""))
     counts = vesicles.klass.value_counts().to_dict() if len(vesicles) else {}
     say(f"  {counts}")
 
@@ -162,6 +277,9 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
         duration_s=float(stack.shape[0] * cfg.dt_seconds),
         drift_span_px=span, n_detections=int(len(spots)), n_vesicles=int(n_ves),
         counts=counts, ordering_violations=int(len(bad)),
+        filters=fsum if len(vesicles) else {},
+        roi_names=roi_names, roi_coverage=_roi.coverage(roi_labels, roi_names),
+        censored=int(vesicles.is_censored.sum()) if len(vesicles) else 0,
         vesicle_outputs_capped_at=cfg.render.max_vesicle_outputs,
         runtime_s=round(time.time() - t0, 1),
     )
@@ -171,7 +289,8 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     say(f"  done in {summary['runtime_s']} s")
 
     return Result(name=name, config=cfg, tracks=tracks, vesicles=vesicles,
-                  summary=summary, stack=stack_c if keep_stack else None)
+                  summary=summary, stack=stack_c if keep_stack else None,
+                  roi_labels=roi_labels, roi_names=roi_names)
 
 
 def analyse_many(paths, config: Config | None = None, output_dir=None,

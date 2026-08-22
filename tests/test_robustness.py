@@ -117,13 +117,41 @@ def test_pure_noise_makes_no_movers(tmp_path):
     assert int(r.counts().get("mover", 0)) == 0
 
 
-def test_short_tracks_have_nan_metrics_not_crashes(movie):
-    """min_length below the coarse window: too few windows to score direction."""
+def test_directed_is_nan_not_zero_when_unmeasurable(movie):
+    """A track spanning under two tau-windows CANNOT have a directed value.
+
+    It must come back NaN, never 0.0. Returning 0.0 is indistinguishable from a vesicle
+    that genuinely did not move: a 60-frame track travelling 20 px in a straight line
+    reported directed=0.00 while net said 20.00, and because net_coarse was 0 too the
+    ordering check passed. This test previously asserted notna().all() and passed
+    BECAUSE of that bug.
+    """
     r = analyse(movie, base_cfg(**{"link.min_length_frames": 5,
-                                   "metrics.tau_directed_frames": 40}),
+                                   "metrics.tau_directed_frames": 40,
+                                   "filters.min_observed_frames": 5}),
                 verbose=False)
-    assert len(r.vesicles) > 0
-    assert r.vesicles.directed.notna().all()       # directed is always defined
+    v = r.vesicles
+    assert len(v) > 0
+    short = v[~v.directed_measurable]
+    long_ = v[v.directed_measurable]
+    assert len(short), "fixture should contain tracks too short to score"
+    assert short.directed.isna().all()          # unmeasurable -> NaN
+    assert short.net_coarse.isna().all()
+    assert long_.directed.notna().all()         # measurable -> a real number
+    assert (v.directed == 0).sum() == 0, "0.0 must never stand in for unmeasurable"
+
+
+def test_straight_mover_shorter_than_tau_is_not_reported_as_zero():
+    """The concrete case that exposed the bug, asserted directly on the metric."""
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 90,
+                      "filters.min_observed_frames": 180})
+    f = np.arange(60); x = np.linspace(0, 20, 60); y = np.zeros(60)
+    m = M.metrics_for_track(x, y, f, cfg, np.random.default_rng(0))
+    assert m["net"] > 19                        # it plainly moved
+    assert np.isnan(m["directed"])              # but directed is not measurable
+    assert not m["directed_measurable"]
 
 
 # ------------------------------------------------------------------- config

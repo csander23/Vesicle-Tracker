@@ -74,7 +74,17 @@ def detect_frame(img: np.ndarray, cfg) -> pd.DataFrame:
     a = img.astype(np.float32)
     if d.background_sigma and d.background_sigma > 0:
         a = a - gaussian_filter(a, d.background_sigma)
-    mean, median, std = sigma_clipped_stats(a, sigma=3.0)
+    # Estimate the noise on real pixels only. On a movie that has been ROI-masked to
+    # zero outside the cell, the zeros dominate the sigma-clipped statistics, std
+    # collapses toward 0 and the threshold with it - or the median shifts and most
+    # detections vanish. Either way the count depends on how much of the frame was
+    # blanked, which is not a property of the sample.
+    finite = np.isfinite(a)
+    zero_frac = float((a == 0).mean())
+    sample = a[finite & (a != 0)] if zero_frac > 0.10 else a[finite]
+    if sample.size < 64:
+        return pd.DataFrame(columns=["x", "y", "flux"])
+    mean, median, std = sigma_clipped_stats(sample, sigma=3.0)
     if std <= 0 or not np.isfinite(std):
         return pd.DataFrame(columns=["x", "y", "flux"])
     finder = DAOStarFinder(fwhm=d.psf_sigma_px * gaussian_sigma_to_fwhm,
@@ -102,6 +112,15 @@ def detect_stack(stack: np.ndarray, cfg, mask: np.ndarray | None = None,
     mask, if given, is a boolean (Y, X) array; detections outside it are dropped, which
     is how a cell outline or a soma exclusion is applied.
     """
+    if mask is not None:
+        mask = np.asarray(mask)
+        if mask.shape != stack.shape[1:]:
+            raise ValueError(
+                f"mask shape {mask.shape} does not match the image {stack.shape[1:]}. "
+                "A mismatched mask silently labels the wrong pixels, so this is "
+                "refused rather than clipped into range.")
+        if mask.dtype != bool:
+            mask = mask != 0
     rows = []
     it = range(len(stack))
     if progress is not None:

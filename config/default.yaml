@@ -58,10 +58,32 @@ link:
                           #   between neighbouring vesicles
   memory_frames: 15       # frames a vesicle may vanish (blink, defocus) and
                           #   still be relinked to the same identity
-  min_length_frames: 40   # drop shorter tracks: too few frames to measure a
-                          #   direction. Must exceed metrics.tau_frames
-  merge_radius_px: 4.0    # tracks whose mean positions sit this close are one
-                          #   vesicle the linker split at a dropout. 0 = off
+  min_length_frames: 3    # HARD floor only - below this no metric exists at all
+                          #   (a 2-frame track has a single step). The scientific
+                          #   length cut is filters.min_observed_frames, which LABELS
+                          #   instead of deleting so nothing vanishes upstream
+  # Rejoining a vesicle the linker LOST ("looking back"). A fragment is rejoined only
+  # if it is temporally disjoint, starts within merge_max_gap_frames of the previous
+  # one ending, and is within merge_radius_px AT THE JUNCTION. Merging on mean
+  # position alone fuses different vesicles that used the same spot at different times.
+  merge_radius_px: 4.0    # end-to-start distance allowed when rejoining. 0 = off
+  merge_max_gap_frames: 15    # how far back to look for a lost vesicle, in frames
+  merge_overlap_tolerance: 2  # frames of overlap still treated as one vesicle;
+                          #   fragments that genuinely coexist are separate vesicles
+
+# ---- vesicle size ----------------------------------------------------------
+# Intensity-weighted second moment of a window around each spot.
+# READ src/vesicletrack/size.py BEFORE USING: a vesicle is below the diffraction
+# limit, so sigma_px is mostly the PSF. Raw sigma_px is the right column for
+# comparing conditions imaged identically; deconvolved size carries a noise floor
+# of ~0.4 px measured on point sources that have no size at all.
+size:
+  enabled: true
+  window_px: 4            # half-width; 4 -> a 9x9 window per spot
+  psf_sigma_px: null      # null = calibrate the PSF from THIS movie (recommended:
+                          #   absorbs the estimator's upward noise bias)
+  psf_from_percentile: 5.0    # which percentile of measured widths is "a point source"
+  max_frames: 200         # frames sampled per track; more buys no precision
 
 # ---- movement metrics ------------------------------------------------------
 # net = |end-start|, gross = summed steps, directed = path at timescale tau.
@@ -97,6 +119,33 @@ classify:
   exclude_max_step_px: 5.0    # one jump this large = suspected mislink
   exclude_n_big_steps: 5      # this many big steps = suspected repeated swap
   big_step_px: 3.0            # what counts as "big" for the rule above
+
+# ---- filters ---------------------------------------------------------------
+# These LABEL vesicles, they never delete them. Every vesicle is written to
+# vesicles_all.csv with passes_filter + filter_reason; the passing subset is also
+# written to vesicles_filtered.csv. Any filter can be re-derived later from the
+# `all` file, so a threshold is a reversible choice rather than lost data.
+# null = rule off.
+filters:
+  min_observed_frames: 180    # frames actually DETECTED (not span). Must be at least
+                              #   2 * metrics.tau_directed_frames (=180 here), because
+                              #   a shorter track spans under two coarse windows and
+                              #   `directed` cannot be formed for it at all - it comes
+                              #   back NaN, flagged directed_measurable=False. Config
+                              #   validation warns if you set this lower.
+  max_observed_frames: null
+  min_lifetime_s: null        # on SPAN: first to last sighting
+  max_lifetime_s: null        # CAUTION: an upper lifetime bound preferentially keeps
+                              #   tracks the tracker LOST early - it selects for
+                              #   tracking failure, not for short-lived biology
+  min_frac_observed: 0.0      # reject tracks that are mostly gap (0.5 = half seen)
+  max_longest_gap: null       # frames
+  exclude_censored: false     # tracks touching the first or last frame have an
+                              #   unobserved true lifetime (right-censored)
+  exclude_classes: [excluded] # `excluded` = suspected identity swap, not biology
+  rois: []                    # e.g. [soma] to keep one region; empty = keep all
+  min_sigma_px: null
+  max_sigma_px: null
 
 # ---- output ----------------------------------------------------------------
 render:

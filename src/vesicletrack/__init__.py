@@ -11,8 +11,9 @@ not enough.
 """
 from .config import Config
 from .pipeline import Result, analyse, analyse_many
-from . import detect, io, linking, metrics, preprocess, render
+from . import aggregate, detect, filters, io, linking, metrics, preprocess, render, roi, size
 
 __version__ = "0.1.0"
 __all__ = ["Config", "Result", "analyse", "analyse_many",
-           "detect", "io", "linking", "metrics", "preprocess", "render"]
+           "aggregate", "detect", "filters", "io", "linking", "metrics", "preprocess",
+           "render", "roi", "size"]

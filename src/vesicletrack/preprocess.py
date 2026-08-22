@@ -34,7 +34,7 @@ def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float
     ref = gaussian_filter(np.median(stack[:nref], axis=0).astype(np.float32), sig)
 
     shifts = np.zeros((len(stack), 2), np.float32)
-    if not np.isfinite(ref).any() or float(ref.std()) < 1e-9:
+    if not np.isfinite(ref).all() or float(ref.std()) < 1e-9:
         # A featureless reference (blank or saturated) gives phase correlation nothing
         # to lock onto; it would return noise. No drift is the honest answer.
         return stack, shifts, 0.0
@@ -57,8 +57,12 @@ def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float
     if span < cfg.drift.min_span_px:
         return stack, shifts, span
 
+    # Round ONLY for integer stacks. Rounding a float stack to whole numbers throws
+    # away the sub-unit intensity that detection and sizing depend on; on a
+    # normalised 0-1 float movie it collapses every pixel to 0 or 1.
+    integral = np.issubdtype(stack.dtype, np.integer)
     out = np.empty_like(stack)
     for t, frame in enumerate(stack):
-        out[t] = nd_shift(frame.astype(np.float32), shifts[t], order=1,
-                          mode="nearest").round().astype(stack.dtype)
+        sh = nd_shift(frame.astype(np.float32), shifts[t], order=1, mode="nearest")
+        out[t] = np.round(sh).astype(stack.dtype) if integral else sh.astype(stack.dtype)
     return out, shifts, span

@@ -58,8 +58,30 @@ class DetectConfig:
 class LinkConfig:
     search_range_px: float = 3.0      # max frame-to-frame displacement
     memory_frames: int = 15           # frames a spot may vanish and still be relinked
-    min_length_frames: int = 40       # tracks shorter than this are dropped
-    merge_radius_px: float = 4.0      # co-located duplicate tracks are merged
+    min_length_frames: int = 3        # HARD floor: below this no metric exists at all
+                                      #   (a 2-frame track has one step). The
+                                      #   scientific length cut lives in `filters`,
+                                      #   where it labels instead of deleting.
+    merge_radius_px: float = 4.0      # fragments closer than this AT THE JUNCTION merge
+    merge_max_gap_frames: int = 15    # "look back" window for rejoining a lost vesicle
+    merge_overlap_tolerance: int = 2  # frames of overlap still treated as one vesicle
+
+
+@dataclass
+class SizeConfig:
+    """Vesicle size from the intensity-weighted second moment.
+
+    `psf_sigma_px` should equal the true PSF width for this objective and wavelength -
+    it is what gets subtracted to give a size in excess of the diffraction limit. It
+    defaults to detect.psf_sigma_px when left null.
+    """
+    enabled: bool = True
+    window_px: int = 4            # half-width; 4 -> a 9x9 window per spot
+    psf_sigma_px: float | None = None   # null = calibrate from the data (see below)
+    psf_from_percentile: float = 5.0    # when psf_sigma_px is null, take this
+                                        #   percentile of measured widths as the PSF
+    max_frames: int = 200         # frames sampled per track; sizing every frame of a
+                                  #   1350-frame track is wasted precision
 
 
 @dataclass
@@ -91,6 +113,28 @@ class ClassifyConfig:
 
 
 @dataclass
+class FiltersConfig:
+    """Which vesicles count as usable. These LABEL, they never delete.
+
+    Every vesicle is reported either way, with `passes_filter` and `filter_reason`,
+    and the passing subset is written to a second file. `null` means the rule is off.
+    """
+    min_observed_frames: int | None = 180  # frames actually detected, not span.
+                                           #   >= 2*tau_directed_frames, else
+                                           #   `directed` is undefined (NaN)
+    max_observed_frames: int | None = None
+    min_lifetime_s: float | None = None     # on SPAN (first to last sighting)
+    max_lifetime_s: float | None = None     # see the selection-bias warning in filters.py
+    min_frac_observed: float | None = 0.0   # reject tracks that are mostly gap
+    max_longest_gap: int | None = None      # frames
+    exclude_censored: bool = False          # tracks touching the first or last frame
+    exclude_classes: list = field(default_factory=lambda: ["excluded"])
+    rois: list = field(default_factory=list)    # empty = keep every region
+    min_sigma_px: float | None = None
+    max_sigma_px: float | None = None
+
+
+@dataclass
 class RenderConfig:
     three_panel: bool = True
     per_vesicle_images: bool = True
@@ -113,8 +157,10 @@ class Config:
     drift: DriftConfig = field(default_factory=DriftConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     link: LinkConfig = field(default_factory=LinkConfig)
+    size: SizeConfig = field(default_factory=SizeConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    filters: FiltersConfig = field(default_factory=FiltersConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
 
     # ---------------------------------------------------------------- loading
@@ -144,7 +190,8 @@ class Config:
                 raise ValueError(
                     f"unknown config key {key!r}. Known keys: {sorted(sections)}")
             sub = {"drift": DriftConfig, "detect": DetectConfig, "link": LinkConfig,
-                   "metrics": MetricsConfig, "classify": ClassifyConfig,
+                   "size": SizeConfig, "metrics": MetricsConfig,
+                   "classify": ClassifyConfig, "filters": FiltersConfig,
                    "render": RenderConfig}.get(key)
             if sub is None:
                 kwargs[key] = val
@@ -214,11 +261,31 @@ class Config:
                 "its contrast against the null")
         if not 0 < self.classify.p_threshold < 1:
             raise ValueError("classify.p_threshold must be in (0, 1)")
+        # `directed` needs at least two tau-windows to exist at all. If the length
+        # filter admits tracks shorter than that, those tracks report directed as NaN
+        # (see metrics.path_at_tau) and drop out of every directed statistic. Warn
+        # loudly rather than letting a headline column quietly go missing.
+        need = 2 * self.metrics.tau_directed_frames
+        keep = self.filters.min_observed_frames
+        if keep is not None and keep < need:
+            import warnings
+            warnings.warn(
+                f"filters.min_observed_frames={keep} is below "
+                f"2*metrics.tau_directed_frames={need}: tracks shorter than "
+                f"{need} frames cannot have a `directed` value at this timescale and "
+                f"will be NaN there. Either raise min_observed_frames to {need}, or "
+                f"lower tau_directed_frames to {keep // 2}, or accept that directed "
+                f"is defined for only part of the population.", stacklevel=2)
         if self.classify.use_permutation and self.metrics.n_permutations < 20:
             raise ValueError("classify.use_permutation needs metrics.n_permutations "
                              ">= 20 to give a usable p-value")
 
     # ----------------------------------------------------------------- units
+    @property
+    def effective_psf_sigma(self) -> float | None:
+        """Explicit PSF width, or None meaning 'calibrate it from this movie'."""
+        return self.size.psf_sigma_px
+
     @property
     def tau_seconds(self) -> float:
         return self.metrics.tau_frames * self.dt_seconds
