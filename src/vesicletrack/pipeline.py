@@ -150,9 +150,13 @@ class Result:
                                                      default=str))
         written["summary"] = out / "summary.json"
 
-        # render=False means NO figures at all. Previously it suppressed only the
-        # three-panel and still wrote distances.png plus up to 25 per-vesicle figures.
-        any_render = True if render is None else bool(render)
+        # render=False means NO figures at all. When render is None the CONFIG
+        # decides, and "no render option is enabled" must mean no figures - otherwise
+        # distances.png appears even after --no-figures turned everything off.
+        r = cfg.render
+        any_render = (bool(render) if render is not None
+                      else any([r.three_panel, r.per_vesicle_images,
+                                r.per_vesicle_videos, r.overview_video]))
         do_panel = (cfg.render.three_panel if render is None else bool(render))
         if do_panel and self.stack is not None and len(self.tracks):
             written["three_panel"] = _render.three_panel(

@@ -111,6 +111,13 @@ def detect_stack(stack: np.ndarray, cfg, mask: np.ndarray | None = None,
 
     mask, if given, is a boolean (Y, X) array; detections outside it are dropped, which
     is how a cell outline or a soma exclusion is applied.
+
+    THE MASK MUST BE IN DRIFT-CORRECTED COORDINATES. This function runs after
+    preprocess.correct_drift, so the stack has been aligned to the median of the first
+    `drift.reference_frames` frames. A mask drawn on the RAW movie is offset by the
+    drift and will clip the wrong pixels - silently, because a slightly wrong mask
+    still returns plausible detections. Draw it on `Result.stack[0]`, or on a
+    projection of the corrected stack, not on the original file.
     """
     if mask is not None:
         mask = np.asarray(mask)
@@ -130,7 +137,7 @@ def detect_stack(stack: np.ndarray, cfg, mask: np.ndarray | None = None,
         if mask is not None and len(df):
             yi = np.clip(df.y.round().astype(int), 0, mask.shape[0] - 1)
             xi = np.clip(df.x.round().astype(int), 0, mask.shape[1] - 1)
-            df = df[mask[yi, xi]]
+            df = df[np.asarray(mask[yi, xi], dtype=bool)]
         if len(df):
             df = df.assign(frame=t)
             rows.append(df)

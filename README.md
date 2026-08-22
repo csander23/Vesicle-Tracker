@@ -14,10 +14,19 @@ res.vesicles        # one row per vesicle, all metrics
 res.save()          # tables + figures + videos
 ```
 
-Or from the shell:
+Or from the shell — one command from movies to every level of CSV:
 
 ```bash
-vesicletrack run "data/*.tif" -c config/default.yaml -o output --videos
+vesicletrack "data/*.tif" -c config/default.yaml -o output \
+    --sheet samples.csv --by genotype --rois cell_mask.tif
+```
+
+`samples.csv` supplies the metadata (the package never guesses it from filenames):
+
+```csv
+file,genotype,batch
+cellA.tif,WT,B1
+cellB.tif,ApoE4,B1
 ```
 
 ---
@@ -190,20 +199,41 @@ uncorrected numbers would have been wrong.
 
 ---
 
-## Output
+## Output — every level, nothing dropped
 
 ```
-output/<name>/
-  config_used.yaml     exact parameters — a figure can always be traced to its run
-  tracks.parquet       particle, frame, x, y  (every vesicle, every frame)
-  vesicles.csv         one row per vesicle: all metrics + class
-  summary.json         counts, drift span, runtime, invariant violations
-  three_panel.png      RAW | ALL VESICLES | CLASSIFIED
-  distances.png        net / directed / gross distributions, directed vs net
-  vesicles/*.png       per vesicle: trajectory + the three distances, drawn and printed
-  vesicle_videos/*.mp4 per-vesicle crops with a trail        (render.per_vesicle_videos)
-  overview.mp4         whole field, coloured by class        (render.overview_video)
+output/
+  vesicles_all.csv      one row per VESICLE, pooled across movies, nothing removed
+  vesicles_filtered.csv the subset passing the filters
+  per_video.csv         one row per VIDEO
+  per_<key>.csv         one row per genotype / batch / whatever you passed to --by
+  long.csv              tidy: level, unit, group, metric, value
+  batch_summary.csv     one row per movie: counts, drift, runtime, failures
+
+  <movie>/
+    config_used.yaml     exact parameters — a figure always traces to its run
+    tracks.parquet       particle, frame, x, y  (every vesicle, every frame)
+    vesicles_all.csv     this movie's vesicles, with passes_filter + filter_reason
+    vesicles_filtered.csv
+    summary.json         counts, drift span, filter breakdown, ROI coverage
+    three_panel.png      RAW | ALL VESICLES | CLASSIFIED
+    distances.png        net / directed / gross distributions
+    vesicles/*.png       per vesicle: trajectory + all three distances
+    vesicle_videos/*.mp4 per-vesicle crops                  (render.per_vesicle_videos)
+    overview.mp4         whole field, coloured by class     (render.overview_video)
 ```
+
+**Filters label; they never delete.** Every tracked vesicle is in `vesicles_all.csv`
+with `passes_filter` and `filter_reason` naming the rule it failed. Any threshold can
+be re-derived from that file later, so a filter is a reversible, auditable choice
+rather than lost data — and you can always answer "how many did we exclude, and were
+they different?".
+
+**Group-level `n` counts videos, not vesicles.** Vesicles within one cell share a cell,
+a transfection and a field of view; treating each as a replicate inflates `n` by
+hundreds and produces significance that will not survive a nested analysis.
+`per_<key>.csv` reports `n_videos` and a `sem` across video means. The per-vesicle
+route to pseudoreplication is not offered.
 
 The three panels answer the two questions worth asking before trusting any number:
 did detection *find* the vesicles (middle), and did classification *label* them
@@ -213,7 +243,43 @@ Per-vesicle output is capped by `render.max_vesicle_outputs` (default 25, movers
 first) so a dense field cannot emit thousands of files. The cap is recorded in
 `summary.json` rather than applied silently.
 
-### Key columns in `vesicles.csv`
+### ROI: in and out, never dropped
+
+```python
+res = analyse("cell.tif", cfg, rois="soma_and_processes.zip")   # ImageJ RoiSet
+res = analyse("cell.tif", cfg, rois={"soma": [(x, y), ...],     # or polygons
+                                     "processes": [...]})
+res.vesicles.roi.value_counts()      # soma / processes / outside
+```
+
+Accepts ImageJ `.roi` and `.zip`, label or mask images, arrays, and named polygons.
+Vesicles **outside every region are kept and labelled `outside`**, because outside is
+usually the comparison group — a pipeline that silently drops them cannot answer the
+question the ROI was drawn to ask. Vesicles that move between regions are assigned by
+majority and flagged (`roi_changed`, `roi_frac`).
+
+### Lifetime, gaps and censoring
+
+`span_frames` (first to last sighting) and `observed_frames` (frames actually detected)
+are different numbers whenever the linker bridged a dropout — on real data the medians
+were **398 vs 167**. Reporting only span describes a vesicle as present in frames where
+nothing was detected, so both are carried, with `n_gaps`, `longest_gap` and
+`frac_observed`.
+
+`is_censored` marks vesicles present in the first or last frame: their true lifetime was
+never observed, and pooling them with complete observations biases mean lifetime
+**downward**.
+
+### Size
+
+`sigma_px` (measured), `sigma_deconv_px` (excess over the PSF), `at_diffraction_limit`.
+Read [`size.py`](src/vesicletrack/size.py) before quoting a number: a vesicle is below
+the diffraction limit, so σ is mostly the PSF, and the estimator has a measured noise
+floor of **~0.4 px** — synthetic point sources of *zero* true size deconvolve to
+0.41 px. Prefer raw `sigma_px` when comparing conditions imaged identically; the PSF
+contribution is common to both and cancels.
+
+### Key columns in `vesicles_all.csv`
 
 | column | meaning |
 |---|---|

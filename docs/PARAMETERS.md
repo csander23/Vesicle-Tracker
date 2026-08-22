@@ -196,7 +196,7 @@ See the [README](../README.md) for why the first two are not enough.
 | `per_vesicle_videos` | `false` | One **file per vesicle**; off by default. |
 | `overview_video` | `false` | Whole field, tracks coloured by class. |
 | `max_vesicle_outputs` | 25 | Cap on per-vesicle files (movers first) so a dense field cannot emit thousands. Recorded in `summary.json` rather than applied silently. |
-| `trail_frames` | 40 | Length of the fading trail in videos. |
+| `trail_frames` | 40 | Trail length in **acquisition frames** (not sampled frames), identical in both video kinds. `0` = no trail. The trail is solid, not fading. |
 | `frame_step` | 4 | Temporal downsample for videos (4 = every 4th frame). |
 | `fps` | 20 | Playback rate of written videos. |
 | `dpi` | 150 | Raster resolution of PNG figures. |

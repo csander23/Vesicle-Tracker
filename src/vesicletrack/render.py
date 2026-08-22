@@ -15,7 +15,8 @@ Three kinds of output, each switchable in `render:` config:
                        way to understand why they differ.
 
   videos               per-vesicle crops and/or a whole-field overview, written via
-                       ffmpeg with a moving trail.
+                       ffmpeg with a solid (not fading) trail of the last
+                       `trail_frames` acquisition frames.
 
 Display uses a percentile stretch shared across every frame of a stack, so brightness
 changes in a video are real and not the renderer re-levelling each frame.
@@ -259,7 +260,7 @@ def _write_video(frames, out_path, fps, exe):
 
 
 def vesicle_video(stack, track, row, cfg, out_path, pad: int = 24):
-    """Cropped movie of one vesicle with a fading trail."""
+    """Cropped movie of one vesicle, trailing the last `trail_frames` frames."""
     if not _have_ffmpeg(cfg.render.ffmpeg):
         return None
     import cv2
@@ -309,13 +310,15 @@ def overview_video(stack, tracks, vesicles, cfg, out_path):
     for t in range(0, len(stack), cfg.render.frame_step):
         rgb = np.repeat(to_uint8(stack[t], lo, hi)[:, :, None], 3, axis=2).copy()
         for xx, yy, c, p in by_frame.get(t, []):
+            # Truncate by FRAME NUMBER, not by list length. Because the overview is
+            # sampled every `frame_step` frames, a length-based cut made trail_frames
+            # mean `trail_frames * frame_step` acquisition frames here while meaning
+            # real frames in vesicle_video - the same parameter, two different lengths.
             h = hist.setdefault(p, [])
-            h.append((xx, yy))
-            if cfg.render.trail_frames > 0:
-                del h[:-cfg.render.trail_frames]
-            else:
-                del h[:-1]          # 0 means no trail, not an infinite one
-            for (ax_, ay_), (bx_, by_) in zip(h[:-1], h[1:]):
+            h.append((t, xx, yy))
+            cutoff = t - max(cfg.render.trail_frames, 0)
+            hist[p] = h = [e for e in h if e[0] >= cutoff]
+            for (_, ax_, ay_), (_, bx_, by_) in zip(h[:-1], h[1:]):
                 cv2.line(rgb, (int(ax_), int(ay_)), (int(bx_), int(by_)), c, 1,
                          cv2.LINE_AA)
             cv2.circle(rgb, (int(xx), int(yy)), 2, c, -1, cv2.LINE_AA)

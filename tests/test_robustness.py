@@ -454,3 +454,25 @@ def test_render_false_writes_no_figures(movie, tmp_path):
     r.save(tmp_path, render=False)
     assert not list((tmp_path / "nr").glob("*.png"))
     assert not (tmp_path / "nr" / "vesicles").exists()
+
+
+def test_cli_end_to_end_with_sheet_and_aggregation(tmp_path, movie):
+    """The documented full command: metadata from a sheet, every level of CSV out."""
+    import subprocess
+    import os
+    sheet = tmp_path / "sheet.csv"
+    sheet.write_text(f"file,genotype\n{Path(movie).name},WT\n")
+    out = subprocess.run(
+        [sys.executable, "-m", "vesicletrack.cli", str(movie), "--dt", "0.05",
+         "--sheet", str(sheet), "--by", "genotype", "--no-figures",
+         "-o", str(tmp_path / "o"), "--quiet"],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
+    assert out.returncode == 0, out.stderr
+    o = tmp_path / "o"
+    for f in ("vesicles_all.csv", "vesicles_filtered.csv", "per_video.csv",
+              "per_genotype.csv", "long.csv"):
+        assert (o / f).exists(), f
+    import pandas as pd
+    assert (pd.read_csv(o / "vesicles_all.csv").genotype == "WT").all()
+    assert not list(o.rglob("*.png")), "--no-figures still wrote images"
