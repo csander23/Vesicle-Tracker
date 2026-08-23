@@ -99,6 +99,12 @@ metrics:
   min_run_disp_px: 1.0    # runs shorter than this are not counted as transport
   min_run_steps: 2        # a run must persist >= 2 coarse steps. MUST be >= 2:
                           #   1 collapses `directed` onto plain path length
+  min_window_occupancy: 0.25  # fraction of tau a window must actually contain to
+                          #   be used. Real vesicles here are only ~42% observed,
+                          #   so a floor of 0.5 discarded windows from perfectly
+                          #   good tracks and took the measurable fraction from
+                          #   18% to 8%. 0.25 sits below the real rate while still
+                          #   excluding one-frame windows that carry full noise
   n_permutations: 200     # per-vesicle null for the p-value. p floors at
                           #   1/(n+1), so 200 -> smallest possible p is 0.005.
                           #   0 disables the p-value entirely
@@ -127,12 +133,19 @@ classify:
 # `all` file, so a threshold is a reversible choice rather than lost data.
 # null = rule off.
 filters:
-  min_observed_frames: 180    # frames actually DETECTED (not span). Must be at least
-                              #   2 * metrics.tau_directed_frames (=180 here), because
-                              #   a shorter track spans under two coarse windows and
-                              #   `directed` cannot be formed for it at all - it comes
-                              #   back NaN, flagged directed_measurable=False. Config
-                              #   validation warns if you set this lower.
+  min_observed_frames: 40     # frames actually DETECTED. A TRACKING-QUALITY cut.
+                              #   This is NOT the requirement for `directed` - that
+                              #   one is on SPAN, below. Gating it on observed frames
+                              #   rejected the genuine vesicles: they are ~40%
+                              #   observed, so a 400-frame vesicle holds only ~163
+                              #   detections and a 180 gate threw it away.
+  min_span_frames: null       # first-to-last extent; null = rule off
+  require_directed_measurable: true   # keep only vesicles for which `directed` exists.
+                              #   This is the EXACT condition, not a proxy: whether it
+                              #   exists depends on how many observed frames land in
+                              #   each tau-window, which no threshold on span or on
+                              #   total observed frames can express. With this on,
+                              #   "filtered" means usable by construction
   max_observed_frames: null
   min_lifetime_s: null        # on SPAN: first to last sighting
   max_lifetime_s: null        # CAUTION: an upper lifetime bound preferentially keeps

@@ -476,3 +476,77 @@ def test_cli_end_to_end_with_sheet_and_aggregation(tmp_path, movie):
     import pandas as pd
     assert (pd.read_csv(o / "vesicles_all.csv").genotype == "WT").all()
     assert not list(o.rglob("*.png")), "--no-figures still wrote images"
+
+
+def test_directed_requirement_is_on_span_not_observed_frames():
+    """The gate that nearly made the defaults useless.
+
+    Real vesicles are only ~40% observed, so one spanning 400 frames holds ~163
+    detections. Gating `directed` on 2*tau OBSERVED frames therefore discarded the
+    genuine vesicles while appearing to protect the metric. The requirement is on SPAN.
+    """
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 90})
+    rng = np.random.default_rng(0)
+    # the real case: spans 400 frames, 42% observed -> 168 detections, which is BELOW
+    # the 2*tau = 180 observed-frame gate that used to reject it.
+    f = np.sort(rng.choice(400, 168, replace=False))
+    m = M.metrics_for_track(np.linspace(0, 8, 168), np.zeros(168), f, cfg,
+                            np.random.default_rng(0))
+    assert m["observed_frames"] < 2 * cfg.metrics.tau_directed_frames
+    assert m["span_frames"] >= 2 * cfg.metrics.tau_directed_frames
+    assert m["directed_measurable"], "span covers two tau-windows: must be measurable"
+    assert np.isfinite(m["directed"])
+
+
+def test_occupancy_floor_keeps_realistically_sparse_windows():
+    """A floor of tau/2 sat above what a 42%-observed vesicle puts in a window."""
+    import numpy as np
+    from vesicletrack import metrics as M
+    rng = np.random.default_rng(1)
+    f = np.sort(rng.choice(400, 168, replace=False))          # 42% observed
+    x = np.linspace(0, 8, 168); y = np.zeros(168)
+    strict = M.coarse(x, y, f, 90, occupancy_frac=0.5)[0]
+    default = M.coarse(x, y, f, 90, occupancy_frac=0.25)[0]
+    assert len(default) > len(strict)
+    assert len(default) >= 2, "the shipped floor must leave a measurable track"
+
+
+def test_shipped_defaults_leave_the_filtered_set_usable():
+    """Every vesicle that passes the default filters must have a usable `directed`."""
+    import numpy as np
+    import pandas as pd
+    from vesicletrack import metrics as M, filters as F
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 40})
+    rng = np.random.default_rng(2)
+    rows = []
+    for p, span in enumerate([20, 60, 150, 400, 400]):
+        f = np.sort(rng.choice(span, max(4, int(span * 0.42)), replace=False))
+        rows.append(pd.DataFrame({"particle": p, "frame": f,
+                                  "x": np.linspace(0, 4, len(f)), "y": 0.0}))
+    v = F.apply_filters(M.score_tracks(pd.concat(rows), cfg, n_movie_frames=400), cfg)
+    passing = v[v.passes_filter]
+    assert len(passing), "the defaults must not reject everything"
+    assert passing.directed_measurable.all(), (
+        "a vesicle that passes the filters must have a measurable directed value")
+    assert passing.directed.notna().all()
+
+
+def test_frame_count_thresholds_cannot_guarantee_measurability():
+    """Why require_directed_measurable exists rather than a span/observed threshold.
+
+    Whether `directed` exists depends on how many observed frames land in each
+    tau-window. A track can clear both a span gate and an observed-frames gate and
+    still be unmeasurable, because its detections clustered into too few windows.
+    """
+    import numpy as np
+    from vesicletrack import metrics as M
+    cfg = base_cfg(**{"metrics.tau_directed_frames": 90})
+    # 200-frame span, 60 observed - but all crammed into one 90-frame window
+    f = np.concatenate([np.arange(0, 55), np.arange(195, 200)])
+    m = M.metrics_for_track(np.linspace(0, 5, len(f)), np.zeros(len(f)), f, cfg,
+                            np.random.default_rng(0))
+    assert m["span_frames"] >= 180          # clears a span gate
+    assert m["observed_frames"] >= 40       # clears an observed-frames gate
+    assert not m["directed_measurable"]     # and is STILL unmeasurable

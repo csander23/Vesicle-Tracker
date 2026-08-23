@@ -55,7 +55,8 @@ import numpy as np
 import pandas as pd
 
 
-def coarse(x, y, f, tau: int, min_occupancy: int | None = None):
+def coarse(x, y, f, tau: int, min_occupancy: int | None = None,
+           occupancy_frac: float | None = None):
     """Average positions within tau-frame windows. Returns (cx, cy, ct, n_per_window).
 
     Two things here are deliberate and were not in the first version.
@@ -73,15 +74,24 @@ def coarse(x, y, f, tau: int, min_occupancy: int | None = None):
     remove. Worse, it made the metric track detection dropout rather than motion: on
     purely stationary simulated vesicles, `directed` rose from 0.117 to 0.164 as the
     observed fraction fell from 1.00 to 0.42, with no change in the underlying motion.
-    Windows with fewer than `min_occupancy` observed frames (default tau // 2) are
-    dropped, so every surviving centroid is averaged over a comparable number of
-    samples. `n_per_window` is returned so callers can see what was kept.
+    Windows with fewer than `min_occupancy` observed frames are dropped, so every
+    surviving centroid is averaged over a comparable number of samples.
+    `n_per_window` is returned so callers can see what was kept.
+
+    The default floor is `metrics.min_window_occupancy` (0.25) of tau, NOT half of it.
+    Half was measured to be too strict for real data: genuine vesicles here are only
+    about 42% observed, so a 90-frame window holds roughly 38 detections and a floor
+    of 45 discarded windows belonging to perfectly good vesicles - taking the fraction
+    of tracks with a measurable `directed` from 18% down to 8%. A quarter sits safely
+    below the real observation rate while still excluding the one- and two-frame
+    windows that carry full localisation noise.
     """
     f = np.asarray(f, dtype=np.int64)
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     if min_occupancy is None:
-        min_occupancy = max(1, tau // 2)
+        frac = 0.25 if occupancy_frac is None else occupancy_frac
+        min_occupancy = max(1, int(round(tau * frac)))
 
     b = f // tau                                    # absolute grid
     uniq, inv = np.unique(b, return_inverse=True)
@@ -94,7 +104,7 @@ def coarse(x, y, f, tau: int, min_occupancy: int | None = None):
     return cx[keep], cy[keep], ct[keep], counts[keep]
 
 
-def path_at_tau(x, y, f, tau: int) -> float:
+def path_at_tau(x, y, f, tau: int, occupancy_frac: float | None = None) -> float:
     """L(tau): path length measured at timescale tau. The directed distance.
 
     Returns NaN - not 0.0 - when the track spans fewer than two tau-windows.
@@ -107,7 +117,7 @@ def path_at_tau(x, y, f, tau: int) -> float:
     reason, so check_ordering saw 20 >= 0 >= 0 and passed. NaN makes the gap visible
     and keeps it out of any median.
     """
-    cx, cy, _, _ = coarse(x, y, f, tau)
+    cx, cy, _, _ = coarse(x, y, f, tau, occupancy_frac=occupancy_frac)
     if len(cx) < 2:
         return float("nan")
     return float(np.hypot(np.diff(cx), np.diff(cy)).sum())
@@ -210,9 +220,11 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
         "observed_s": float(len(f) * cfg.dt_seconds),
         "net": float(np.hypot(x[-1] - x[0], y[-1] - y[0])),
         "gross": float(np.hypot(np.diff(x), np.diff(y)).sum()),
-        "directed": path_at_tau(x, y, f, m.tau_directed_frames),
+        "directed": path_at_tau(x, y, f, m.tau_directed_frames,
+                                occupancy_frac=m.min_window_occupancy),
     }
-    dcx, dcy, _, _ = coarse(x, y, f, m.tau_directed_frames)
+    dcx, dcy, _, _ = coarse(x, y, f, m.tau_directed_frames,
+                            occupancy_frac=m.min_window_occupancy)
     out["net_coarse"] = (float(np.hypot(dcx[-1] - dcx[0], dcy[-1] - dcy[0]))
                          if len(dcx) >= 2 else float("nan"))
     # Explicit flag so "not measurable at this tau" is a filterable state rather than
@@ -222,7 +234,8 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     out["tau_frames"] = int(m.tau_frames)
     out["tau_directed_frames"] = int(m.tau_directed_frames)
 
-    cx, cy, _, _ = coarse(x, y, f, m.tau_frames)
+    cx, cy, _, _ = coarse(x, y, f, m.tau_frames,
+                          occupancy_frac=m.min_window_occupancy)
     nan_keys = ["coarse_path", "runs_total", "runs_null", "runs_excess",
                 "runs_z", "runs_p", "n_runs", "longest_run", "frac_in_runs",
                 "persistence", "max_excursion", "rg", "aniso"]

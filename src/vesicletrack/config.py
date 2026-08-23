@@ -91,6 +91,8 @@ class MetricsConfig:
     max_turn_deg: float = 60.0        # a step turning more than this ends a run
     min_run_disp_px: float = 1.0      # runs shorter than this are not transport
     min_run_steps: int = 2            # a run must persist >= 2 coarse steps
+    min_window_occupancy: float = 0.25  # fraction of tau a window must contain to
+                                        #   count; see metrics.coarse
     n_permutations: int = 200         # per-vesicle null; 0 disables the p-value
     random_seed: int = 0
 
@@ -119,9 +121,12 @@ class FiltersConfig:
     Every vesicle is reported either way, with `passes_filter` and `filter_reason`,
     and the passing subset is written to a second file. `null` means the rule is off.
     """
-    min_observed_frames: int | None = 180  # frames actually detected, not span.
-                                           #   >= 2*tau_directed_frames, else
-                                           #   `directed` is undefined (NaN)
+    min_observed_frames: int | None = 40   # frames actually detected. A tracking
+                                           #   quality cut, NOT the `directed`
+                                           #   requirement - that one is on span.
+    min_span_frames: int | None = None     # first-to-last extent; null = off
+    require_directed_measurable: bool = True   # exact guarantee that `directed` exists
+                                               #   for everything in the filtered set
     max_observed_frames: int | None = None
     min_lifetime_s: float | None = None     # on SPAN (first to last sighting)
     max_lifetime_s: float | None = None     # see the selection-bias warning in filters.py
@@ -305,21 +310,25 @@ class Config:
                 "its contrast against the null")
         if not 0 < self.classify.p_threshold < 1:
             raise ValueError("classify.p_threshold must be in (0, 1)")
-        # `directed` needs at least two tau-windows to exist at all. If the length
-        # filter admits tracks shorter than that, those tracks report directed as NaN
-        # (see metrics.path_at_tau) and drop out of every directed statistic. Warn
-        # loudly rather than letting a headline column quietly go missing.
+        # `directed` needs at least two tau-windows, which is a requirement on SPAN
+        # (first to last sighting), not on the number of frames actually detected.
+        # Checking it against min_observed_frames was wrong and actively harmful: real
+        # vesicles are only ~40% observed, so tracks spanning 400 frames hold ~163
+        # observed ones, and a 2*tau=180 observed-frame gate rejected the genuine
+        # vesicles while claiming to protect the metric.
+        if not 0.0 <= self.metrics.min_window_occupancy <= 1.0:
+            raise ValueError("metrics.min_window_occupancy must be in [0, 1]")
         need = 2 * self.metrics.tau_directed_frames
-        keep = self.filters.min_observed_frames
-        if keep is not None and keep < need:
+        span = self.filters.min_span_frames
+        if span is not None and span < need:
             import warnings
             warnings.warn(
-                f"filters.min_observed_frames={keep} is below "
-                f"2*metrics.tau_directed_frames={need}: tracks shorter than "
-                f"{need} frames cannot have a `directed` value at this timescale and "
-                f"will be NaN there. Either raise min_observed_frames to {need}, or "
-                f"lower tau_directed_frames to {keep // 2}, or accept that directed "
-                f"is defined for only part of the population.", stacklevel=2)
+                f"filters.min_span_frames={span} is below "
+                f"2*metrics.tau_directed_frames={need}: tracks spanning less than "
+                f"{need} frames cannot have a `directed` value at this timescale, so "
+                f"part of the FILTERED set will report NaN there. Set "
+                f"min_span_frames={need} to keep the filtered set coherent, or accept "
+                f"that `directed` is defined for only part of it.", stacklevel=2)
         if self.classify.use_permutation and self.metrics.n_permutations < 20:
             raise ValueError("classify.use_permutation needs metrics.n_permutations "
                              ">= 20 to give a usable p-value")

@@ -112,7 +112,9 @@ a filter is a reversible, auditable choice rather than lost data. `null` = rule 
 
 | parameter | default | what it does |
 |---|---|---|
-| `min_observed_frames` | 180 | Frames actually **detected** (not span). Must be ≥ `2 × tau_directed_frames`. |
+| `min_observed_frames` | 40 | Frames actually **detected**. A tracking-quality cut — *not* the `directed` requirement. |
+| `min_span_frames` | `null` | First-to-last extent. `null` = off. |
+| `require_directed_measurable` | `true` | Keep only vesicles for which `directed` exists — the **exact** condition, so `vesicles_filtered.csv` is usable by construction. |
 | `max_observed_frames` | `null` | Upper bound on detected frames. |
 | `min_lifetime_s` | `null` | On **span** — first to last sighting. |
 | `max_lifetime_s` | `null` | Upper bound on span. **See the bias warning below.** |
@@ -123,9 +125,13 @@ a filter is a reversible, auditable choice rather than lost data. `null` = rule 
 | `rois` | `[]` | Keep only these regions, e.g. `[soma]`. Empty keeps all, including `outside`. |
 | `min_sigma_px` / `max_sigma_px` | `null` | Size bounds. |
 
-> **`directed` needs two τ-windows to exist.** A track shorter than
-> `2 × tau_directed_frames` spans under two coarse windows, so no coarse path can be
-> formed and `directed` comes back **NaN**, flagged `directed_measurable = False`.
+> **`directed` needs two τ-windows to exist — a requirement on SPAN, not on observed
+> frames.** A track spanning less than `2 × tau_directed_frames` cannot form a coarse
+> path, so `directed` comes back **NaN**, flagged `directed_measurable = False`.
+> Gating this on `min_observed_frames` instead was actively harmful: real vesicles are
+> only ~40% observed, so one spanning 400 frames holds ~163 detections, and a
+> 180-observed-frame gate discarded the genuine vesicles while appearing to protect
+> the metric. Use `min_span_frames` for that job.
 > Earlier this returned `0.0`, which was silently wrong — a vesicle travelling 20 px in
 > a straight line over 60 frames reported `directed = 0.00` while `net` said `20.00`,
 > and because `net_coarse` was 0 too the ordering check passed. Config validation now
@@ -152,6 +158,7 @@ See the [README](../README.md) for why the first two are not enough.
 | `tau_directed_frames` | 90 (~4 s) | frames | The timescale defining "consistent direction" — this sets the `directed` column. Larger = only slower, more persistent motion counts. Must be ≥ `tau_frames`. |
 | `max_turn_deg` | 60 | ° | A step turning more than this ends a run. |
 | `min_run_disp_px` | 1.0 | px | Runs shorter than this are not counted as transport. |
+| `min_window_occupancy` | 0.25 | fraction | Share of τ a window must actually contain to be used. Below this it is dropped. |
 | `min_run_steps` | 2 | steps | A run must persist ≥ 2 coarse steps. **Must be ≥ 2** — `1` collapses `directed` onto plain path length and the metric loses all contrast against the null. Validation rejects it. |
 | `n_permutations` | 200 | | Per-vesicle null. `p` floors at `1/(n+1)`, so 200 → smallest possible p is 0.005. `0` disables the p-value. Validation rejects a `p_threshold` below that floor, which would make `mover` unreachable. |
 | `random_seed` | 0 | | Affects **only** the null, never the measurement. |

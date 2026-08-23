@@ -35,6 +35,9 @@ def _rule_list(cfg):
     if f.min_observed_frames is not None:
         rules.append((f"observed_frames<{f.min_observed_frames}",
                       lambda d: d.observed_frames >= f.min_observed_frames))
+    if getattr(f, "min_span_frames", None) is not None:
+        rules.append((f"span_frames<{f.min_span_frames}",
+                      lambda d: d.span_frames >= f.min_span_frames))
     if f.max_observed_frames is not None:
         rules.append((f"observed_frames>{f.max_observed_frames}",
                       lambda d: d.observed_frames <= f.max_observed_frames))
@@ -50,6 +53,17 @@ def _rule_list(cfg):
     if f.max_longest_gap is not None:
         rules.append((f"longest_gap>{f.max_longest_gap}",
                       lambda d: d.longest_gap <= f.max_longest_gap))
+    if getattr(f, "require_directed_measurable", False):
+        # The EXACT condition, not a proxy for it. Whether `directed` exists depends on
+        # how many observed frames land in each tau-window, which no threshold on span
+        # or on total observed frames can express: tracks passing span>=180 and
+        # observed>=40 still came back unmeasurable when their frames clustered into
+        # too few windows. Filtering on the computed flag makes "filtered" mean usable
+        # by construction, whatever the parameters interact into.
+        rules.append(("directed not measurable",
+                      lambda d: d.directed_measurable.astype(bool)
+                      if "directed_measurable" in d
+                      else pd.Series(True, index=d.index)))
     if f.exclude_censored:
         rules.append(("censored", lambda d: ~d.is_censored.astype(bool)))
     if f.exclude_classes:
