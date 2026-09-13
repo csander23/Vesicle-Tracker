@@ -382,6 +382,6 @@ Read in this order to understand it: `config/default.yaml` (what is adjustable) 
 with its units, default, and which direction to move it. The same notes are inline in
 `config/default.yaml`, and a test asserts the two never drift apart from the code.
 
-## Licence
+## License
 
 MIT.
