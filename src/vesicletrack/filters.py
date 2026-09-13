@@ -19,8 +19,8 @@ cut, and the count discarded by it is reported in the summary.
 
 SELECTION BIAS WARNING, applied by `max_observed_frames` / `max_lifetime_s`: an upper
 bound on lifetime preferentially keeps tracks the tracker LOST early. Filtering on it
-selects for tracking failure, not for short-lived biology. `report_bias` puts the
-resulting censored fraction in the summary so the effect is visible.
+selects for tracking failure, not for short-lived biology. The censored count in
+`summary.json` is there so the effect stays visible.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _rule_list(cfg):
     if f.min_observed_frames is not None:
         rules.append((f"observed_frames<{f.min_observed_frames}",
                       lambda d: d.observed_frames >= f.min_observed_frames))
-    if getattr(f, "min_span_frames", None) is not None:
+    if f.min_span_frames is not None:
         rules.append((f"span_frames<{f.min_span_frames}",
                       lambda d: d.span_frames >= f.min_span_frames))
     if f.max_observed_frames is not None:
@@ -53,7 +53,7 @@ def _rule_list(cfg):
     if f.max_longest_gap is not None:
         rules.append((f"longest_gap>{f.max_longest_gap}",
                       lambda d: d.longest_gap <= f.max_longest_gap))
-    if getattr(f, "require_directed_measurable", False):
+    if f.require_directed_measurable:
         # The EXACT condition, not a proxy for it. Whether `directed` exists depends on
         # how many observed frames land in each tau-window, which no threshold on span
         # or on total observed frames can express: tracks passing span>=180 and

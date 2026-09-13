@@ -8,7 +8,12 @@ long-format file for plotting.
     vesicles_filtered.csv the subset passing filters
     per_video.csv         one row per VIDEO
     per_<key>.csv         one row per group, batch, genotype ... whatever you name
-    long.csv              tidy: level, unit, group, metric, value
+    long.csv              tidy: level, <metadata columns>, metric, value
+
+Metadata columns are whatever was stamped on the vesicles (analyse(..., genotype=...)
+or a sample sheet). Nothing here knows their names: every metadata key travels from
+the Result to every level unchanged, so `--by mouse` works the moment a `mouse`
+column exists.
 
 WHY VIDEO IS THE UNIT THAT MATTERS
 ----------------------------------
@@ -16,9 +21,9 @@ Vesicles within one cell are not independent - they share a cell, a transfection
 field of view and a focal plane. Treating each vesicle as a replicate inflates n by a
 factor of hundreds and produces significance that will not survive a nested analysis.
 
-So group-level statistics here are computed ACROSS VIDEOS, from video means: the
+So group-level statistics here are computed ACROSS VIDEOS, from video medians: the
 `n` reported at group level is the number of videos, never the number of vesicles, and
-`sem` is the standard error of the video means. The per-vesicle count is still
+`sem` is the standard error of the video values. The per-vesicle count is still
 reported, as `n_vesicles`, but it is never used as the sample size.
 
 If you want per-vesicle statistics anyway - for a distribution shape, say - use
@@ -40,19 +45,35 @@ DEFAULT_METRICS = ["net", "gross", "directed", "net_rate", "gross_rate",
                    "sigma_px", "sigma_deconv_px", "fwhm_px"]
 
 
-def summarise_video(vesicles: pd.DataFrame, name: str | None = None,
-                    metrics: list | None = None, meta: dict | None = None) -> dict:
-    """One row for one video: counts, class fractions, and the median of each metric."""
-    metrics = metrics or DEFAULT_METRICS
-    rec: dict = {"video": name}
-    rec.update(meta or {})
-    rec["n_vesicles"] = int(len(vesicles))
-    if not len(vesicles):
-        return rec
+def _unpack(item) -> tuple[str, pd.DataFrame, dict]:
+    """A Result, or a (name, vesicles) / (name, vesicles, meta) tuple."""
+    if hasattr(item, "vesicles"):
+        return item.name, item.vesicles, dict(item.meta)
+    name, ves, *rest = item
+    return name, ves, dict(rest[0]) if rest else {}
 
+
+def summarise_video(vesicles: pd.DataFrame, name: str | None = None,
+                    metrics: list | None = None, meta: dict | None = None,
+                    use_filtered: bool = True) -> dict:
+    """One row for one video: counts, class fractions, and the median of each metric.
+
+    use_filtered: summarise only the vesicles passing the filters (the usual choice).
+    The unfiltered count is still reported as n_vesicles_all, with n_pass / n_fail,
+    so how much the filter removed is always visible.
+    """
+    metrics = metrics or DEFAULT_METRICS
+    rec: dict = {"video": name, **(meta or {})}
+    rec["n_vesicles_all"] = int(len(vesicles))
     if "passes_filter" in vesicles:
         rec["n_pass"] = int(vesicles.passes_filter.sum())
         rec["n_fail"] = int((~vesicles.passes_filter).sum())
+        if use_filtered:
+            vesicles = vesicles[vesicles.passes_filter]
+    rec["n_vesicles"] = int(len(vesicles))          # the ones summarised below
+    if not len(vesicles):
+        return rec
+
     if "klass" in vesicles:
         counts = vesicles.klass.value_counts()
         for k in ("mover", "confined", "excluded"):
@@ -73,31 +94,14 @@ def summarise_video(vesicles: pd.DataFrame, name: str | None = None,
     return rec
 
 
-def per_video(results_or_frames, metrics: list | None = None,
+def per_video(results, metrics: list | None = None,
               use_filtered: bool = True) -> pd.DataFrame:
-    """One row per video, from Result objects or (name, DataFrame) pairs.
-
-    use_filtered: summarise only vesicles passing the filters (the usual choice). The
-    unfiltered counts are still reported as n_vesicles / n_fail either way, so how much
-    the filter removed is always visible.
-    """
+    """One row per video, from Result objects or (name, vesicles[, meta]) tuples."""
     rows = []
-    for item in results_or_frames:
-        if hasattr(item, "vesicles"):
-            allv, name = item.vesicles, item.name
-            meta = {k: item.summary.get(k) for k in ("duration_s", "frames")
-                    if k in item.summary}
-        else:
-            name, allv = item
-            meta = {}
-        use = allv[allv.passes_filter] if (use_filtered and
-                                           "passes_filter" in allv) else allv
-        rec = summarise_video(use, name=name, metrics=metrics)
-        rec["n_vesicles_all"] = int(len(allv))
-        for c in ("batch", "group", "genotype", "condition", "treatment", "animal"):
-            if c in allv.columns and len(allv):
-                rec[c] = allv[c].iloc[0]
-        rows.append(rec)
+    for item in results:
+        name, ves, meta = _unpack(item)
+        rows.append(summarise_video(ves, name=name, metrics=metrics, meta=meta,
+                                    use_filtered=use_filtered))
     return pd.DataFrame(rows)
 
 
@@ -138,13 +142,17 @@ def per_group(video_table: pd.DataFrame, by: str | list, metrics: list | None = 
 
 
 def to_long(video_table: pd.DataFrame, id_cols: list | None = None) -> pd.DataFrame:
-    """Tidy long format for plotting: one row per (video, metric)."""
-    id_cols = id_cols or [c for c in
-                          ("video", "batch", "group", "genotype", "condition",
-                           "treatment", "animal")
-                          if c in video_table.columns]
-    val_cols = [c for c in video_table.columns
-                if c not in id_cols and pd.api.types.is_numeric_dtype(video_table[c])]
+    """Tidy long format for plotting: one row per (video, metric).
+
+    id_cols are the identifier columns - `video` plus the metadata. Pass them when
+    known (write_all does); the fallback treats every non-numeric column as an
+    identifier, which misfiles numeric metadata such as batch=3 as a metric.
+    """
+    if id_cols is None:
+        id_cols = ["video"] + [c for c in video_table.columns if c != "video" and
+                               not pd.api.types.is_numeric_dtype(video_table[c])]
+    id_cols = [c for c in id_cols if c in video_table.columns]
+    val_cols = [c for c in video_table.columns if c not in id_cols]
     long = video_table.melt(id_vars=id_cols, value_vars=val_cols,
                             var_name="metric", value_name="value")
     long.insert(0, "level", "video")
@@ -162,11 +170,13 @@ def write_all(results, output_dir, by=None, metrics: list | None = None,
     out.mkdir(parents=True, exist_ok=True)
     written: dict = {}
 
-    frames = []
-    for r in results:
-        v = r.vesicles.copy() if hasattr(r, "vesicles") else r[1].copy()
-        v.insert(0, "video", r.name if hasattr(r, "name") else r[0])
+    frames, meta_cols = [], []
+    for item in results:
+        name, ves, meta = _unpack(item)
+        v = ves.copy()
+        v.insert(0, "video", name)
         frames.append(v)
+        meta_cols += [k for k in meta if k not in meta_cols]
     allv = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     allv.to_csv(out / "vesicles_all.csv", index=False)
@@ -181,12 +191,11 @@ def write_all(results, output_dir, by=None, metrics: list | None = None,
 
     if by:
         for key in ([by] if isinstance(by, str) else by):
-            if key in vid.columns:
-                g = per_group(vid, key, metrics=metrics)
-                g.to_csv(out / f"per_{key}.csv", index=False)
-                written[f"per_{key}"] = out / f"per_{key}.csv"
+            g = per_group(vid, key, metrics=metrics)      # raises if key is unknown
+            g.to_csv(out / f"per_{key}.csv", index=False)
+            written[f"per_{key}"] = out / f"per_{key}.csv"
 
-    to_long(vid).to_csv(out / "long.csv", index=False)
+    to_long(vid, ["video"] + meta_cols).to_csv(out / "long.csv", index=False)
     written["long"] = out / "long.csv"
     return written
 

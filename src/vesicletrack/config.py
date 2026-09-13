@@ -28,6 +28,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -150,8 +152,16 @@ class RenderConfig:
     frame_step: int = 4                # temporal downsample for videos
     fps: int = 20
     dpi: int = 150
-    percentiles: tuple = (1.0, 99.7)   # display stretch
+    percentiles: list = field(default_factory=lambda: [1.0, 99.7])   # display stretch
     ffmpeg: str = "ffmpeg"
+
+
+# Section name -> dataclass. The one place this mapping lives; loading, validation
+# and the docs test all read it, so a new section cannot be added to one and missed
+# by the others.
+SECTIONS = {"drift": DriftConfig, "detect": DetectConfig, "link": LinkConfig,
+            "size": SizeConfig, "metrics": MetricsConfig, "classify": ClassifyConfig,
+            "filters": FiltersConfig, "render": RenderConfig}
 
 
 @dataclass
@@ -188,16 +198,13 @@ class Config:
 
     @classmethod
     def _from_dict(cls, raw: dict) -> "Config":
-        sections = {f.name: f.type for f in dataclasses.fields(cls)}
+        known_keys = {f.name for f in dataclasses.fields(cls)}
         kwargs: dict = {}
         for key, val in raw.items():
-            if key not in sections:
+            if key not in known_keys:
                 raise ValueError(
-                    f"unknown config key {key!r}. Known keys: {sorted(sections)}")
-            sub = {"drift": DriftConfig, "detect": DetectConfig, "link": LinkConfig,
-                   "size": SizeConfig, "metrics": MetricsConfig,
-                   "classify": ClassifyConfig, "filters": FiltersConfig,
-                   "render": RenderConfig}.get(key)
+                    f"unknown config key {key!r}. Known keys: {sorted(known_keys)}")
+            sub = SECTIONS.get(key)
             if sub is None:
                 kwargs[key] = val
             else:
@@ -257,7 +264,6 @@ class Config:
         # Types first. A NaN passes every inequality below (all comparisons with NaN
         # are False), and a numpy scalar survives the whole run only to break
         # yaml.safe_dump at save time - after the analysis has been paid for.
-        import math
         for name, val in (("dt_seconds", self.dt_seconds),
                           ("um_per_px", self.um_per_px)):
             if val is None:
@@ -321,7 +327,6 @@ class Config:
         need = 2 * self.metrics.tau_directed_frames
         span = self.filters.min_span_frames
         if span is not None and span < need:
-            import warnings
             warnings.warn(
                 f"filters.min_span_frames={span} is below "
                 f"2*metrics.tau_directed_frames={need}: tracks spanning less than "
@@ -335,17 +340,9 @@ class Config:
 
     # ----------------------------------------------------------------- units
     @property
-    def effective_psf_sigma(self) -> float | None:
-        """Explicit PSF width, or None meaning 'calibrate it from this movie'."""
-        return self.size.psf_sigma_px
-
-    @property
     def tau_seconds(self) -> float:
         return self.metrics.tau_frames * self.dt_seconds
 
     @property
     def tau_directed_seconds(self) -> float:
         return self.metrics.tau_directed_frames * self.dt_seconds
-
-    def px_to_um(self, v):
-        return None if self.um_per_px is None else v * self.um_per_px

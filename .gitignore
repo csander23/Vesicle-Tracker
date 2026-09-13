@@ -13,3 +13,4 @@ output/
 examples/synthetic.tif
 .pytest_cache/
 examples/realdata.nosync/
+.claude/

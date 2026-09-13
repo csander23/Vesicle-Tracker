@@ -122,7 +122,7 @@ a filter is a reversible, auditable choice rather than lost data. `null` = rule 
 | `max_longest_gap` | `null` | Longest single dropout allowed, in frames. |
 | `exclude_censored` | `false` | Drop tracks touching the first or last frame. |
 | `exclude_classes` | `[excluded]` | `excluded` = suspected identity swap; a tracking judgement, not biology. |
-| `rois` | `[]` | Keep only these regions, e.g. `[soma]`. Empty keeps all, including `outside`. |
+| `rois` | `[]` | Keep only these regions, e.g. `[soma]`. Empty keeps all, including `outside`. Regions come from `analyse(..., rois=)` / `--rois`; to restrict *detection* to one cell use `mask=` / `--mask` instead, which is not a filter. |
 | `min_sigma_px` / `max_sigma_px` | `null` | Size bounds. |
 
 > **`directed` needs two τ-windows to exist — a requirement on SPAN, not on observed

@@ -5,32 +5,17 @@ the directed metric rests on, and that the six planted movers are still recovere
 
     pytest -q
 """
-import subprocess
-import sys
-from pathlib import Path
-
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from vesicletrack import Config, analyse  # noqa: E402
-from vesicletrack.metrics import check_ordering  # noqa: E402
-
-MOVIE = ROOT / "examples" / "synthetic.tif"
-N_MOVER, N_TOTAL = 6, 30
+from conftest import N_MOVER, N_TOTAL, base_cfg
+from vesicletrack import Config, analyse
+from vesicletrack.metrics import check_ordering
 
 
 @pytest.fixture(scope="module")
-def result():
-    if not MOVIE.exists():
-        subprocess.run([sys.executable, str(ROOT / "examples" / "make_synthetic.py"),
-                        str(MOVIE)], check=True)
-    cfg = Config.load(ROOT / "config" / "default.yaml", **{
-        "dt_seconds": 0.05, "metrics.tau_frames": 10,
-        "metrics.tau_directed_frames": 40, "link.min_length_frames": 30,
-        "metrics.n_permutations": 100})
-    return analyse(MOVIE, cfg, name="test", verbose=False)
+def result(movie):
+    return analyse(movie, base_cfg(**{"metrics.n_permutations": 100}),
+                   name="test", verbose=False)
 
 
 def test_finds_most_vesicles(result):
@@ -69,7 +54,7 @@ def test_config_rejects_bad_values():
 
 
 def test_config_roundtrip(tmp_path):
-    cfg = Config.load(ROOT / "config" / "default.yaml", **{"dt_seconds": 0.1})
+    cfg = base_cfg(**{"dt_seconds": 0.1})
     p = tmp_path / "c.yaml"
     cfg.save(p)
     assert Config.load(p).dt_seconds == 0.1

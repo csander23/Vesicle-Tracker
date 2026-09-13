@@ -33,6 +33,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .metrics import coarse
+
 KLASS_COLOR = {"mover": "#2ecc40", "confined": "#00c8ff", "excluded": "#ff4136",
                "invalid": "#b10dc9"}
 UNKNOWN_COLOR = "#aaaaaa"
@@ -54,15 +56,11 @@ def to_uint8(img: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return (np.clip((img.astype(np.float32) - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
 
 
-def _projection(stack: np.ndarray) -> np.ndarray:
-    return stack.max(axis=0)
-
-
 # -------------------------------------------------------------- three panel
 def three_panel(stack, tracks, vesicles, cfg, out_path, title=""):
     """RAW | ALL VESICLES | CLASSIFIED. Returns the written path."""
     lo, hi = stretch(stack, cfg.render.percentiles)
-    proj = to_uint8(_projection(stack), lo, hi)
+    proj = to_uint8(stack.max(axis=0), lo, hi)
     kl = dict(zip(vesicles.particle, vesicles.klass)) if len(vesicles) else {}
 
     fig, ax = plt.subplots(1, 3, figsize=(15, 5.4), facecolor="white")
@@ -81,7 +79,7 @@ def three_panel(stack, tracks, vesicles, cfg, out_path, title=""):
 
     counts = {}
     for p, d in tracks.groupby("particle"):
-        k = kl.get(p, "confined")
+        k = kl.get(p, "unknown")
         counts[k] = counts.get(k, 0) + 1
         ax[2].plot(d.x, d.y, lw=0.9, color=klass_color(k), alpha=0.95)
     lab = "   ".join(f"{k} {v}" for k, v in sorted(counts.items()))
@@ -110,8 +108,10 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
     y0 = int(max(0, np.floor(y.min()) - pad)); y1 = int(min(H, np.ceil(y.max()) + pad))
     crop = to_uint8(stack[f[0]:f[-1] + 1, y0:y1, x0:x1].max(axis=0), lo, hi)
 
-    from .metrics import coarse
-    cx, cy, _, _ = coarse(x, y, f, cfg.metrics.tau_directed_frames)
+    # Same window and same occupancy floor as the measurement, so the drawn coarse
+    # path is the one `directed` was computed from.
+    cx, cy, _, _ = coarse(x, y, f, cfg.metrics.tau_directed_frames,
+                          cfg.metrics.min_window_occupancy)
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 5.2), facecolor="white",
                            gridspec_kw={"width_ratios": [1, 1]})
@@ -302,7 +302,7 @@ def overview_video(stack, tracks, vesicles, cfg, out_path):
     by_frame: dict[int, list] = {}
     for p, d in tracks.groupby("particle"):
         c = tuple(int(v * 255) for v in
-                  matplotlib.colors.to_rgb(klass_color(kl.get(p, "confined"))))
+                  matplotlib.colors.to_rgb(klass_color(kl.get(p, "unknown"))))
         for fr, xx, yy in zip(d.frame.values, d.x.values, d.y.values):
             by_frame.setdefault(int(fr), []).append((xx, yy, c, p))
     hist: dict[int, list] = {}

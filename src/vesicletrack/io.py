@@ -143,6 +143,25 @@ def frame_interval_from_nd2(path: str | Path) -> float | None:
     return float(np.median(np.diff(t))) if len(t) > 2 else None
 
 
+def read_sample_sheet(path: str | Path) -> dict:
+    """{file name: {column: value}} from a CSV with a `file` column.
+
+    The sheet is how metadata (batch, genotype, ...) reaches the output: the user
+    supplies the mapping from file to metadata, and the package never guesses it from
+    a filename convention that is only true in one lab. Files are matched on their
+    base name, so the sheet can list bare names or full paths. Empty cells are left
+    out rather than stamped as NaN.
+    """
+    sh = pd.read_csv(path)
+    if "file" not in sh.columns:
+        raise ValueError(f"{path} needs a `file` column; got {list(sh.columns)}")
+    out = {}
+    for row in sh.to_dict("records"):
+        key = Path(row.pop("file")).name
+        out[key] = {k: v for k, v in row.items() if pd.notna(v)}
+    return out
+
+
 def save_table(df: pd.DataFrame, path: str | Path) -> Path:
     """Parquet when pyarrow is available (tracks get long), CSV otherwise."""
     path = Path(path)

@@ -8,6 +8,7 @@ Grouped by what is being defended:
   batch       one bad file must not kill the run
   determinism same seed, same answer
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,30 +18,9 @@ import pandas as pd
 import pytest
 import tifffile
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from vesicletrack import Config, analyse, analyse_many  # noqa: E402
-from vesicletrack import io as vio  # noqa: E402
-
-MOVIE = ROOT / "examples" / "synthetic.tif"
-
-
-def base_cfg(**kw):
-    d = {"dt_seconds": 0.05, "metrics.tau_frames": 10,
-         "metrics.tau_directed_frames": 40, "link.min_length_frames": 30,
-         "metrics.n_permutations": 50,
-         "render.three_panel": False, "render.per_vesicle_images": False}
-    d.update(kw)
-    return Config.load(ROOT / "config" / "default.yaml", **d)
-
-
-@pytest.fixture(scope="module")
-def movie():
-    if not MOVIE.exists():
-        subprocess.run([sys.executable, str(ROOT / "examples" / "make_synthetic.py"),
-                        str(MOVIE)], check=True)
-    return MOVIE
+from conftest import ROOT, base_cfg
+from vesicletrack import Config, analyse, analyse_many
+from vesicletrack import io as vio
 
 
 # ------------------------------------------------------------------- inputs
@@ -143,7 +123,6 @@ def test_directed_is_nan_not_zero_when_unmeasurable(movie):
 
 def test_straight_mover_shorter_than_tau_is_not_reported_as_zero():
     """The concrete case that exposed the bug, asserted directly on the metric."""
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 90,
                       "filters.min_observed_frames": 180})
@@ -311,7 +290,6 @@ def test_non_mapping_config_is_refused(tmp_path):
 
 
 def test_cli_accepts_json_config(tmp_path, movie):
-    import subprocess
     cj = tmp_path / "cfg.json"
     Config.load(ROOT / "config" / "default.yaml").save(cj)
     out = subprocess.run(
@@ -319,7 +297,7 @@ def test_cli_accepts_json_config(tmp_path, movie):
          "-c", str(cj), "--dt", "0.05",
          "-o", str(tmp_path / "o"), "--quiet"],
         capture_output=True, text=True, cwd=ROOT,
-        env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")})
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     assert out.returncode == 0, out.stderr
     assert (tmp_path / "o" / "batch_summary.csv").exists()
 
@@ -332,7 +310,6 @@ def test_directed_does_not_depend_on_when_the_track_started(movie):
     arbitrary phase against the window grid - the same trajectory gave 0.000 at one
     length and 4.550 one frame later.
     """
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
                       "filters.min_observed_frames": 80})
@@ -347,7 +324,6 @@ def test_directed_does_not_depend_on_when_the_track_started(movie):
 
 def test_sparse_windows_do_not_inflate_directed():
     """Occupancy floor: a window holding one frame carries full localisation noise."""
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
                       "filters.min_observed_frames": 80})
@@ -363,7 +339,6 @@ def test_sparse_windows_do_not_inflate_directed():
 
 def test_degenerate_null_reports_infinite_z_not_zero():
     """A null with no spread is MAXIMUM evidence, not none."""
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
                       "filters.min_observed_frames": 80})
@@ -376,8 +351,6 @@ def test_degenerate_null_reports_infinite_z_not_zero():
 
 def test_nonfinite_coordinate_is_invalid_not_confined():
     """A NaN must not yield a confident biological label."""
-    import numpy as np
-    import pandas as pd
     from vesicletrack import metrics as M
     cfg = base_cfg()
     x = np.linspace(0, 10, 200); x[57] = np.nan
@@ -389,8 +362,6 @@ def test_nonfinite_coordinate_is_invalid_not_confined():
 
 def test_pvalue_does_not_depend_on_other_tracks_in_the_table():
     """Per-track RNG: a vesicle's class must not change because a neighbour exists."""
-    import numpy as np
-    import pandas as pd
     from vesicletrack import metrics as M
     cfg = base_cfg()
     solo = pd.DataFrame({"particle": 7, "frame": np.arange(200),
@@ -403,8 +374,6 @@ def test_pvalue_does_not_depend_on_other_tracks_in_the_table():
 
 
 def test_duplicate_particle_frame_rows_are_refused():
-    import pandas as pd
-    import numpy as np
     from vesicletrack import metrics as M
     tr = pd.DataFrame({"particle": [0, 0], "frame": [1, 1], "x": [1.0, 2.0],
                        "y": [0.0, 0.0]})
@@ -413,7 +382,6 @@ def test_duplicate_particle_frame_rows_are_refused():
 
 
 def test_empty_result_keeps_its_schema():
-    import pandas as pd
     from vesicletrack import metrics as M
     v = M.score_tracks(pd.DataFrame(columns=["particle", "frame", "x", "y"]),
                        base_cfg())
@@ -423,7 +391,6 @@ def test_empty_result_keeps_its_schema():
 
 def test_zstack_is_refused_by_its_own_metadata(tmp_path):
     """A z-stack has the same 3-D shape as a time series; the file says which it is."""
-    import numpy as np
     import tifffile
     p = tmp_path / "zstack.tif"
     tifffile.imwrite(p, np.zeros((12, 64, 64), np.uint16),
@@ -458,8 +425,6 @@ def test_render_false_writes_no_figures(movie, tmp_path):
 
 def test_cli_end_to_end_with_sheet_and_aggregation(tmp_path, movie):
     """The documented full command: metadata from a sheet, every level of CSV out."""
-    import subprocess
-    import os
     sheet = tmp_path / "sheet.csv"
     sheet.write_text(f"file,genotype\n{Path(movie).name},WT\n")
     out = subprocess.run(
@@ -473,7 +438,6 @@ def test_cli_end_to_end_with_sheet_and_aggregation(tmp_path, movie):
     for f in ("vesicles_all.csv", "vesicles_filtered.csv", "per_video.csv",
               "per_genotype.csv", "long.csv"):
         assert (o / f).exists(), f
-    import pandas as pd
     assert (pd.read_csv(o / "vesicles_all.csv").genotype == "WT").all()
     assert not list(o.rglob("*.png")), "--no-figures still wrote images"
 
@@ -485,7 +449,6 @@ def test_directed_requirement_is_on_span_not_observed_frames():
     detections. Gating `directed` on 2*tau OBSERVED frames therefore discarded the
     genuine vesicles while appearing to protect the metric. The requirement is on SPAN.
     """
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 90})
     rng = np.random.default_rng(0)
@@ -502,7 +465,6 @@ def test_directed_requirement_is_on_span_not_observed_frames():
 
 def test_occupancy_floor_keeps_realistically_sparse_windows():
     """A floor of tau/2 sat above what a 42%-observed vesicle puts in a window."""
-    import numpy as np
     from vesicletrack import metrics as M
     rng = np.random.default_rng(1)
     f = np.sort(rng.choice(400, 168, replace=False))          # 42% observed
@@ -515,8 +477,6 @@ def test_occupancy_floor_keeps_realistically_sparse_windows():
 
 def test_shipped_defaults_leave_the_filtered_set_usable():
     """Every vesicle that passes the default filters must have a usable `directed`."""
-    import numpy as np
-    import pandas as pd
     from vesicletrack import metrics as M, filters as F
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40})
     rng = np.random.default_rng(2)
@@ -540,7 +500,6 @@ def test_frame_count_thresholds_cannot_guarantee_measurability():
     tau-window. A track can clear both a span gate and an observed-frames gate and
     still be unmeasurable, because its detections clustered into too few windows.
     """
-    import numpy as np
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 90})
     # 200-frame span, 60 observed - but all crammed into one 90-frame window
@@ -550,3 +509,136 @@ def test_frame_count_thresholds_cannot_guarantee_measurability():
     assert m["span_frames"] >= 180          # clears a span gate
     assert m["observed_frames"] >= 40       # clears an observed-frames gate
     assert not m["directed_measurable"]     # and is STILL unmeasurable
+
+
+# ------------------------------------------------ batched null, metadata, outputs
+def _runs_reference(steps, max_turn_deg, min_disp, min_steps):
+    """The original one-track-at-a-time run detector, kept as the oracle."""
+    n = len(steps)
+    if n == 0:
+        return 0.0, 0, 0.0, 0
+    cosmax = np.cos(np.deg2rad(max_turn_deg))
+    total = longest = 0.0
+    nkept = nsteps = 0
+    i = 0
+    while i < n:
+        acc = steps[i].copy()
+        j = i + 1
+        while j < n:
+            h, s = np.hypot(*acc), np.hypot(*steps[j])
+            if h < 1e-9 or s < 1e-9:
+                break
+            if float(acc @ steps[j]) / (h * s) < cosmax:
+                break
+            acc = acc + steps[j]
+            j += 1
+        d = float(np.hypot(*acc))
+        if d >= min_disp and (j - i) >= min_steps:
+            total += d
+            nkept += 1
+            nsteps += j - i
+            longest = max(longest, d)
+        i = j
+    return total, nkept, longest, nsteps
+
+
+def test_batched_runs_match_the_scalar_reference_exactly():
+    """runs() on a (P, n, 2) batch must equal the per-track loop, bit for bit.
+
+    The null is scored as one batch; the observation as one track. If the two paths
+    ever disagreed the p-value would compare unlike quantities.
+    """
+    from vesicletrack import metrics as M
+    rng = np.random.default_rng(11)
+    for n in (1, 2, 3, 7, 40):
+        batch = rng.normal(0, 1.0, (25, n, 2))
+        batch[rng.random(batch.shape[:2]) < 0.05] = 0.0      # some zero-length steps
+        got = M.runs(batch, 60.0, 1.0, 2)
+        for k in range(25):
+            want = _runs_reference(batch[k], 60.0, 1.0, 2)
+            assert (got[0][k], got[1][k], got[2][k], got[3][k]) == want, (n, k)
+            assert M.runs(batch[k], 60.0, 1.0, 2) == want
+
+
+def test_null_uses_the_same_random_stream_as_before():
+    """One (P, n) draw must equal P successive draws of n, or seeds stop reproducing."""
+    r1 = np.random.default_rng([0, 5])
+    a = np.array([r1.uniform(0, 2 * np.pi, 7) for _ in range(4)])
+    r2 = np.random.default_rng([0, 5])
+    assert np.array_equal(a, r2.uniform(0, 2 * np.pi, (4, 7)))
+
+
+def test_any_metadata_column_reaches_every_level(movie, tmp_path):
+    """Metadata names are the user's; nothing in the package may hard-code them."""
+    from vesicletrack import aggregate
+    a = analyse(movie, base_cfg(), name="c1", verbose=False, mouse="m1", dish=3)
+    b = analyse(movie, base_cfg(), name="c2", verbose=False, mouse="m2", dish=3)
+    assert a.meta == {"mouse": "m1", "dish": 3}
+    assert a.summary["mouse"] == "m1"
+    w = aggregate.write_all([a, b], tmp_path, by=["mouse", "dish"])
+    vid = pd.read_csv(w["per_video"])
+    assert list(vid.mouse) == ["m1", "m2"] and list(vid.dish) == [3, 3]
+    assert len(pd.read_csv(w["per_mouse"])) == 2
+    assert pd.read_csv(w["per_dish"]).n_videos.iloc[0] == 2
+    long = pd.read_csv(w["long"])
+    assert {"mouse", "dish"} <= set(long.columns)
+    assert "mouse" not in set(long.metric)          # an identifier, not a metric
+
+
+def test_per_video_counts_the_unfiltered_population(movie):
+    """n_pass / n_fail describe ALL vesicles, not the already-filtered subset."""
+    from vesicletrack import aggregate
+    r = analyse(movie, base_cfg(**{"filters.min_observed_frames": 10_000}),
+                verbose=False)
+    row = aggregate.per_video([r]).iloc[0]
+    assert row.n_vesicles_all > 0
+    assert row.n_fail == row.n_vesicles_all and row.n_pass == 0
+    assert row.n_vesicles == 0
+
+
+def test_stale_figures_are_removed_on_resave(movie, tmp_path):
+    r = analyse(movie, base_cfg(**{"render.three_panel": True}), name="s",
+                verbose=False)
+    r.save(tmp_path)
+    assert (tmp_path / "s" / "three_panel.png").exists()
+    r.save(tmp_path, render=False)
+    assert not (tmp_path / "s" / "three_panel.png").exists()
+    assert not (tmp_path / "s" / "distances.png").exists()
+
+
+def test_mask_accepts_a_file(movie, tmp_path):
+    s = tifffile.imread(movie)
+    m = np.zeros(s.shape[1:], np.uint8)
+    m[: s.shape[1] // 2] = 255
+    p = tmp_path / "mask.tif"
+    tifffile.imwrite(p, m)
+    half = analyse(movie, base_cfg(), mask=p, verbose=False)
+    full = analyse(movie, base_cfg(), verbose=False)
+    assert 0 < half.summary["n_vesicles"] < full.summary["n_vesicles"]
+    assert half.tracks.y.max() <= s.shape[1] / 2 + 2
+
+
+def test_analyse_many_writes_every_level_and_the_batch_summary(movie, tmp_path):
+    sheet = {Path(movie).name: {"genotype": "WT"}}
+    df = analyse_many([movie], base_cfg(), tmp_path, sheet=sheet, by="genotype",
+                      verbose=False)
+    assert df.genotype.iloc[0] == "WT"
+    for f in ("batch_summary.csv", "per_video.csv", "per_genotype.csv", "long.csv",
+              "vesicles_all.csv", "vesicles_filtered.csv"):
+        assert (tmp_path / f).exists(), f
+
+
+def test_cli_mask_and_overview_flags(movie, tmp_path):
+    s = tifffile.imread(movie)
+    m = np.zeros(s.shape[1:], bool)
+    m[:, : s.shape[2] // 2] = True
+    np.save(tmp_path / "mask.npy", m)
+    out = subprocess.run(
+        [sys.executable, "-m", "vesicletrack.cli", str(movie), "--dt", "0.05",
+         "--mask", str(tmp_path / "mask.npy"), "--no-figures",
+         "-o", str(tmp_path / "o"), "--quiet"],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
+    assert out.returncode == 0, out.stderr
+    ves = pd.read_csv(tmp_path / "o" / "vesicles_all.csv")
+    assert ves.x0.max() <= s.shape[2] / 2 + 2

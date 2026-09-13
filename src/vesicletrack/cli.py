@@ -1,4 +1,4 @@
-"""Command line entry point:  vesicletrack run movie.tif -c config/default.yaml"""
+"""Command line entry point:  vesicletrack "data/*.tif" -c config/default.yaml -o output"""
 from __future__ import annotations
 
 import argparse
@@ -6,25 +6,29 @@ import glob
 import sys
 from pathlib import Path
 
-import pandas as pd
 import yaml
 
 from .config import Config
-from .pipeline import analyse
+from .io import read_sample_sheet
+from .pipeline import analyse_many
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="vesicletrack",
                                  description="Detect, track and score vesicles.")
     ap.add_argument("inputs", nargs="+", help="movie file(s) or glob(s)")
-    ap.add_argument("-c", "--config", default=None, help="YAML config")
+    ap.add_argument("-c", "--config", default=None, help="YAML (or JSON) config")
     ap.add_argument("-o", "--output", default=None, help="output directory")
     ap.add_argument("--dt", type=float, default=None, help="frame interval, seconds")
     ap.add_argument("--um-per-px", type=float, default=None)
+    ap.add_argument("--mask", default=None,
+                    help="where to DETECT, applied to every movie: a binary image "
+                         "(.tif/.png/.npy) or ImageJ .roi/.zip. Use it to restrict "
+                         "the analysis to one traced cell.")
     ap.add_argument("--rois", default=None,
-                    help="ROI source applied to every movie: ImageJ .roi/.zip, a mask "
-                         "or label image, or .npy. Vesicles outside every region are "
-                         "KEPT and labelled 'outside', not discarded.")
+                    help="regions to LABEL, applied to every movie: ImageJ .roi/.zip, "
+                         "a mask or label image, or .npy. Vesicles outside every "
+                         "region are KEPT and labelled 'outside', not discarded.")
     ap.add_argument("--channel", type=int, default=None,
                     help="channel index, for multi-channel files")
     ap.add_argument("--z-project", choices=["max", "mean"], default=None,
@@ -37,6 +41,8 @@ def main(argv=None) -> int:
                          "genotype or batch,genotype. Writes per_<key>.csv")
     ap.add_argument("--videos", action="store_true",
                     help="also write per-vesicle videos")
+    ap.add_argument("--overview-video", action="store_true",
+                    help="also write a whole-field video, tracks coloured by class")
     ap.add_argument("--no-figures", action="store_true",
                     help="tables only; skip every image and video")
     ap.add_argument("--quiet", action="store_true")
@@ -49,6 +55,8 @@ def main(argv=None) -> int:
         over["um_per_px"] = a.um_per_px
     if a.videos:
         over["render.per_vesicle_videos"] = True
+    if a.overview_video:
+        over["render.overview_video"] = True
     if a.no_figures:
         over.update({"render.three_panel": False,
                      "render.per_vesicle_images": False,
@@ -56,6 +64,7 @@ def main(argv=None) -> int:
                      "render.overview_video": False})
     try:
         cfg = Config.load(a.config, **over)
+        sheet = read_sample_sheet(a.sheet) if a.sheet else None
     except (ValueError, OSError, yaml.YAMLError) as e:
         # A bad parameter is user error, not a bug: say what is wrong and stop,
         # rather than printing a traceback the user has to read backwards.
@@ -79,48 +88,13 @@ def main(argv=None) -> int:
         if not files:
             return 2
 
-    # A sample sheet keeps this lab's filename conventions OUT of the package: the
-    # user supplies the mapping from file to metadata, rather than the package
-    # guessing it from a naming scheme that is only true here.
-    sheet = {}
-    if a.sheet:
-        sh = pd.read_csv(a.sheet)
-        if "file" not in sh.columns:
-            ap.error(f"{a.sheet} needs a `file` column")
-        for row in sh.to_dict("records"):
-            key = Path(row.pop("file")).name
-            sheet[key] = {k: v for k, v in row.items() if pd.notna(v)}
-
-    results, rows = [], []
-    for f in files:
-        meta = sheet.get(Path(f).name, {})
-        try:
-            r = analyse(f, cfg, rois=a.rois, channel=a.channel,
-                        z_project=a.z_project, verbose=not a.quiet, **meta)
-            r.save(a.output)
-            results.append(r)
-            rows.append(r.summary)
-        except Exception as e:                                  # noqa: BLE001
-            if not a.quiet:
-                print(f"FAILED {f}: {type(e).__name__}: {e}", flush=True)
-            rows.append(dict(name=Path(f).stem, source=str(f), error=repr(e)))
-    df = pd.DataFrame(rows)
-
-    # Every level, in one place, so the CSVs the user actually analyses are produced
-    # by the same command that produced the per-movie output.
-    if results:
-        from . import aggregate
-        by = [b.strip() for b in a.by.split(",")] if a.by else None
-        w = aggregate.write_all(results, Path(a.output or cfg.output_dir), by=by)
-        if not a.quiet:
-            print("\naggregated:")
-            for k, v in w.items():
-                print(f"  {k:20s} {v}")
-    out = Path(a.output or cfg.output_dir) / "batch_summary.csv"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False)
+    by = [b.strip() for b in a.by.split(",")] if a.by else None
+    df = analyse_many(files, cfg, a.output, sheet=sheet, by=by, verbose=not a.quiet,
+                      rois=a.rois, mask=a.mask, channel=a.channel,
+                      z_project=a.z_project)
     n_fail = int(df["error"].notna().sum()) if "error" in df else 0
     if not a.quiet:
+        out = Path(a.output or cfg.output_dir) / "batch_summary.csv"
         print(f"\n{len(df)} movie(s) -> {out}"
               + (f"   ({n_fail} FAILED)" if n_fail else ""))
     # Exit non-zero if anything failed, so a CI job or a shell loop notices.

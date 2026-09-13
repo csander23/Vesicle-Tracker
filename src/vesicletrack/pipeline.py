@@ -4,16 +4,18 @@
 
 Everything is decided by the config; the only other input is the path. `analyse`
 returns a Result holding the tracks, the per-vesicle table and the run summary, and
-knows how to write its own outputs.
+knows how to write its own outputs. `analyse_many` runs a list of movies, tolerates a
+bad file, and writes the pooled tables at every level.
 
 Order of operations, and why:
 
-  load -> drift-correct -> detect -> link -> score -> classify -> render
+  load -> drift-correct -> detect -> link -> score -> classify -> size -> roi -> filter
 
 Drift correction comes before detection because stage drift moves every vesicle
 together and would otherwise be measured as transport in all of them at once.
 Classification comes after scoring because the mover test is a comparison against each
-vesicle's own permutation null, which needs the metrics first.
+vesicle's own permutation null, which needs the metrics first. Filters come last and
+only label, so every earlier stage sees every vesicle.
 """
 from __future__ import annotations
 
@@ -36,49 +38,11 @@ from . import render as _render
 from . import roi as _roi
 from . import size as _size
 
-
-def measure_track_sizes(stack: np.ndarray, tracks: pd.DataFrame, cfg) -> pd.DataFrame:
-    """Per-track size, measured on a sample of each track's own frames.
-
-    Frames are sampled evenly within each track (cap: size.max_frames) and then grouped
-    BY FRAME, so every spot in a frame is measured in one vectorised call rather than
-    one call per spot. Sizing all 1350 frames of a long track buys no precision that
-    200 evenly spaced frames do not already give.
-    """
-    if not cfg.size.enabled or not len(tracks):
-        return pd.DataFrame(columns=["particle"])
-    cap = max(1, int(cfg.size.max_frames))
-    picks = []
-    for p, d in tracks.groupby("particle", sort=False):
-        d = d.sort_values("frame")
-        idx = (np.linspace(0, len(d) - 1, min(cap, len(d))).round().astype(int)
-               if len(d) > cap else np.arange(len(d)))
-        picks.append(d.iloc[np.unique(idx)])
-    sel = pd.concat(picks, ignore_index=True)
-
-    per_frame = []
-    for fr, d in sel.groupby("frame", sort=True):
-        sz = _size.measure_frame(stack[int(fr)], d.x.values, d.y.values, cfg)
-        sz["particle"] = d.particle.values
-        per_frame.append(sz)
-    allsz = pd.concat(per_frame, ignore_index=True)
-
-    psf = cfg.effective_psf_sigma
-    if psf is None:
-        psf = _size.estimate_psf_sigma(allsz.sigma_px.values,
-                                       cfg.size.psf_from_percentile)
-    rows = []
-    for p, d in allsz.groupby("particle", sort=True):
-        rec = _size.summarise_track(d, cfg)
-        rec["particle"] = int(p)
-        rows.append(rec)
-    out = pd.DataFrame(rows)
-    dec, lim = _size.deconvolve(out.sigma_px.values, psf)
-    out["sigma_deconv_px"] = dec
-    out["at_diffraction_limit"] = lim
-    out["psf_sigma_used_px"] = psf
-    out["fwhm_px"] = out.sigma_px * 2.3548200450309493
-    return out
+# Figures a save() may or may not regenerate. Anything here that is not rewritten is
+# removed first, so a figure from an earlier parameter set never sits beside tables
+# it does not belong to.
+_FIGURES = ("three_panel.png", "distances.png", "overview.mp4")
+_FIGURE_DIRS = ("vesicles", "vesicle_videos")
 
 
 @dataclass
@@ -88,6 +52,7 @@ class Result:
     tracks: pd.DataFrame
     vesicles: pd.DataFrame
     summary: dict
+    meta: dict = field(default_factory=dict)     # batch=, genotype=, ... as given
     stack: np.ndarray | None = field(default=None, repr=False)
     roi_labels: np.ndarray | None = field(default=None, repr=False)
     roi_names: list = field(default_factory=list)
@@ -109,16 +74,22 @@ class Result:
         return self.vesicles[self.vesicles.passes_filter]
 
     def check(self) -> pd.DataFrame:
-        """Vesicles violating gross >= directed >= net. Should be empty."""
+        """Vesicles violating gross >= directed >= net_coarse. Should be empty."""
         return _metrics.check_ordering(self.vesicles)
 
     # --------------------------------------------------------------- writing
     def save(self, output_dir=None, render: bool | None = None) -> dict:
+        """Write tables, then whichever figures the config (or `render`) asks for.
+
+        render=None   the `render:` section of the config decides
+        render=False  tables only, no figure of any kind
+        render=True   the three-panel is forced on; the rest still follow the config
+        """
         cfg = self.config
         out = Path(output_dir or cfg.output_dir) / self.name
         # Two movies with the same stem in different folders would otherwise write to
         # the same directory and the second would overwrite the first, silently.
-        if out.exists() and (out / "summary.json").exists():
+        if (out / "summary.json").exists():
             try:
                 prev = json.loads((out / "summary.json").read_text()).get("source")
             except Exception:
@@ -129,19 +100,17 @@ class Result:
                     f"Two inputs share the stem {self.name!r}. Pass name=... to "
                     "analyse(), or use distinct output directories.")
         out.mkdir(parents=True, exist_ok=True)
-        # Stale per-vesicle figures from a previous parameter set would otherwise sit
-        # beside the new tables and be read as belonging to them.
-        for sub in ("vesicles", "vesicle_videos"):
-            d = out / sub
-            if d.exists():
-                for f in d.glob("*"):
-                    f.unlink()
+        for name in _FIGURES:
+            (out / name).unlink(missing_ok=True)
+        for sub in _FIGURE_DIRS:
+            for f in (out / sub).glob("*"):
+                f.unlink()
         written: dict = {}
 
         cfg.save(out / "config_used.yaml")
         written["tracks"] = _io.save_table(self.tracks, out / "tracks.parquet")
-        # Two lists per video, as asked: everything, and the usable subset. The `all`
-        # file is the one to keep - any filter can be re-derived from it later.
+        # Two lists per video: everything, and the usable subset. The `all` file is
+        # the one to keep - any filter can be re-derived from it later.
         written["vesicles_all"] = _io.save_table(self.vesicles,
                                                  out / "vesicles_all.csv")
         written["vesicles_filtered"] = _io.save_table(self.filtered,
@@ -150,44 +119,46 @@ class Result:
                                                      default=str))
         written["summary"] = out / "summary.json"
 
-        # render=False means NO figures at all. When render is None the CONFIG
-        # decides, and "no render option is enabled" must mean no figures - otherwise
-        # distances.png appears even after --no-figures turned everything off.
         r = cfg.render
-        any_render = (bool(render) if render is not None
-                      else any([r.three_panel, r.per_vesicle_images,
-                                r.per_vesicle_videos, r.overview_video]))
-        do_panel = (cfg.render.three_panel if render is None else bool(render))
-        if do_panel and self.stack is not None and len(self.tracks):
+        want = dict(panel=r.three_panel, images=r.per_vesicle_images,
+                    videos=r.per_vesicle_videos, overview=r.overview_video)
+        if render is False:
+            want = {k: False for k in want}
+        elif render is True:
+            want["panel"] = True
+        if not any(want.values()) or not len(self.vesicles):
+            return written
+
+        if want["panel"] and self.stack is not None and len(self.tracks):
             written["three_panel"] = _render.three_panel(
                 self.stack, self.tracks, self.vesicles, cfg,
                 out / "three_panel.png", title=self.name)
-        if any_render and len(self.vesicles):
-            written["distances"] = _render.distance_summary(
-                self.vesicles, cfg, out / "distances.png")
+        written["distances"] = _render.distance_summary(
+            self.vesicles, cfg, out / "distances.png")
+        if self.stack is None:
+            return written
 
-        if any_render and self.stack is not None and len(self.vesicles):
-            sel = self._selection()
-            if cfg.render.per_vesicle_images:
-                d = out / "vesicles"
-                for _, row in sel.iterrows():
-                    tr = self.tracks[self.tracks.particle == row.particle]
-                    _render.vesicle_image(self.stack, tr, row, cfg,
-                                          d / f"vesicle_{int(row.particle):04d}.png")
-                written["vesicle_images"] = d
-            if cfg.render.per_vesicle_videos:
-                d = out / "vesicle_videos"
-                made = [_render.vesicle_video(
-                    self.stack, self.tracks[self.tracks.particle == row.particle],
-                    row, cfg, d / f"vesicle_{int(row.particle):04d}.mp4")
-                    for _, row in sel.iterrows()]
-                if any(m is not None for m in made):
-                    written["vesicle_videos"] = d
-            if cfg.render.overview_video:
-                v = _render.overview_video(self.stack, self.tracks, self.vesicles,
-                                           cfg, out / "overview.mp4")
-                if v:
-                    written["overview_video"] = v
+        sel = self._selection()
+        if want["images"]:
+            d = out / "vesicles"
+            for _, row in sel.iterrows():
+                tr = self.tracks[self.tracks.particle == row.particle]
+                _render.vesicle_image(self.stack, tr, row, cfg,
+                                      d / f"vesicle_{int(row.particle):04d}.png")
+            written["vesicle_images"] = d
+        if want["videos"]:
+            d = out / "vesicle_videos"
+            made = [_render.vesicle_video(
+                self.stack, self.tracks[self.tracks.particle == row.particle],
+                row, cfg, d / f"vesicle_{int(row.particle):04d}.mp4")
+                for _, row in sel.iterrows()]
+            if any(m is not None for m in made):
+                written["vesicle_videos"] = d
+        if want["overview"]:
+            v = _render.overview_video(self.stack, self.tracks, self.vesicles,
+                                       cfg, out / "overview.mp4")
+            if v:
+                written["overview_video"] = v
         return written
 
     def _selection(self) -> pd.DataFrame:
@@ -203,7 +174,7 @@ class Result:
 
 
 def analyse(path, config: Config | None = None, *, name: str | None = None,
-            rois=None, mask: np.ndarray | None = None, channel: int | None = None,
+            rois=None, mask=None, channel: int | None = None,
             z_project: str | None = None, keep_stack: bool = True,
             progress=None, verbose: bool = True, **meta) -> Result:
     """Run the full pipeline on one movie.
@@ -211,10 +182,16 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     rois    ROI source (see roi.load_rois): ImageJ .roi/.zip, label or mask image,
             array, or {name: polygon}. Vesicles are LABELLED by region; those outside
             every region are kept and labelled "outside", not discarded.
-    mask    legacy: a boolean array restricting DETECTION. Prefer `rois`, which keeps
-            the outside population instead of deleting it.
+    mask    where to DETECT: a boolean array, or any file roi.load_rois accepts.
+            Detections outside it never exist, so use it for "this cell only" (a
+            traced outline) and `rois` for "which part of the cell" (soma/process).
     **meta  extra columns to stamp on every row (batch=, group=, genotype=, ...) so
             results from many movies can be pooled without re-parsing filenames.
+
+    Both `rois` and `mask` are applied in DRIFT-CORRECTED coordinates - the stack is
+    aligned to the median of the first `drift.reference_frames` frames before either
+    is used. Draw them on `Result.stack[0]` or a projection of the corrected stack,
+    not on the raw file, when the measured drift is not negligible.
     """
     cfg = config or Config()
     cfg.validate()
@@ -230,8 +207,8 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     say(f"{name}: {stack.shape[0]} frames, {stack.shape[2]}x{stack.shape[1]} px")
 
     roi_labels, roi_names = _roi.load_rois(rois, stack.shape[1:])
-    if mask is None and roi_names and getattr(cfg, "restrict_detection_to_rois", False):
-        mask = roi_labels > 0
+    if mask is not None and not isinstance(mask, np.ndarray):
+        mask = _roi.load_rois(mask, stack.shape[1:])[0] > 0
 
     stack_c, shifts, span = _pre.correct_drift(stack, cfg)
     if cfg.drift.enabled:
@@ -250,7 +227,7 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     vesicles = _metrics.score_tracks(tracks, cfg, n_movie_frames=len(stack_c))
 
     if len(vesicles) and cfg.size.enabled:
-        sz = measure_track_sizes(stack_c, tracks, cfg)
+        sz = _size.measure_tracks(stack_c, tracks, cfg)
         if len(sz):
             vesicles = vesicles.merge(sz, on="particle", how="left")
             say(f"  size: median sigma {vesicles.sigma_px.median():.2f} px "
@@ -275,9 +252,11 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
 
     bad = _metrics.check_ordering(vesicles) if len(vesicles) else pd.DataFrame()
     if len(bad):
-        say(f"  WARNING: {len(bad)} vesicles violate gross >= directed >= net")
+        say(f"  WARNING: {len(bad)} vesicles violate gross >= directed >= net_coarse")
 
-    summary = dict(
+    # Metadata first, so a pipeline key of the same name wins.
+    summary = dict(meta)
+    summary.update(
         name=name, source=str(path), frames=int(stack.shape[0]),
         height=int(stack.shape[1]), width=int(stack.shape[2]),
         dt_seconds=cfg.dt_seconds, um_per_px=cfg.um_per_px,
@@ -296,26 +275,54 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     say(f"  done in {summary['runtime_s']} s")
 
     return Result(name=name, config=cfg, tracks=tracks, vesicles=vesicles,
-                  summary=summary, stack=stack_c if keep_stack else None,
+                  summary=summary, meta=dict(meta),
+                  stack=stack_c if keep_stack else None,
                   roi_labels=roi_labels, roi_names=roi_names)
 
 
 def analyse_many(paths, config: Config | None = None, output_dir=None,
-                 save: bool = True, verbose: bool = True, **kw) -> pd.DataFrame:
+                 save: bool = True, *, sheet: dict | None = None, by=None,
+                 verbose: bool = True, **kw) -> pd.DataFrame:
     """Run over several movies; returns one summary row per movie.
 
-    A failure on one movie is recorded and the batch continues - one unreadable file
-    should not cost the whole run.
+    A failure on one movie is recorded in its row's `error` column and the batch
+    continues - one unreadable file should not cost the whole run.
+
+    sheet   {file name: {column: value}} metadata stamped on each movie's vesicles;
+            io.read_sample_sheet builds it from a CSV
+    by      column(s) to aggregate by, e.g. "genotype" or ["batch", "genotype"];
+            writes per_<key>.csv for each
+    **kw    passed to analyse() for every movie (rois=, mask=, channel=, ...)
+
+    With save=True each movie gets its own folder under output_dir, and the pooled
+    tables at every level (aggregate.write_all) plus batch_summary.csv are written
+    beside them - the CSVs the user analyses come from the same call that produced
+    the per-movie output.
     """
-    rows = []
+    cfg = config or Config()
+    out = Path(output_dir or cfg.output_dir)
+    sheet = sheet or {}
+    results, rows = [], []
     for p in paths:
         try:
-            r = analyse(p, config, verbose=verbose, **kw)
+            r = analyse(p, cfg, verbose=verbose, **sheet.get(Path(p).name, {}), **kw)
             if save:
-                r.save(output_dir)
+                r.save(out)
+            results.append(r)
             rows.append(r.summary)
         except Exception as e:                                  # noqa: BLE001
             if verbose:
                 print(f"FAILED {p}: {type(e).__name__}: {e}", flush=True)
             rows.append(dict(name=Path(p).stem, source=str(p), error=repr(e)))
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if save:
+        out.mkdir(parents=True, exist_ok=True)
+        if results:
+            from . import aggregate
+            written = aggregate.write_all(results, out, by=by)
+            if verbose:
+                print("\naggregated:")
+                for k, v in written.items():
+                    print(f"  {k:20s} {v}")
+        df.to_csv(out / "batch_summary.csv", index=False)
+    return df

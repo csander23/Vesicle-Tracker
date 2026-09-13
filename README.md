@@ -18,8 +18,11 @@ Or from the shell — one command from movies to every level of CSV:
 
 ```bash
 vesicletrack "data/*.tif" -c config/default.yaml -o output \
-    --sheet samples.csv --by genotype --rois cell_mask.tif
+    --sheet samples.csv --by genotype --mask cell_outline.tif --rois soma_and_processes.zip
 ```
+
+`--mask` says where to *detect* (one traced cell); `--rois` says how to *label* what
+was detected (soma vs process). Both are optional.
 
 `samples.csv` supplies the metadata (the package never guesses it from filenames):
 
@@ -81,7 +84,7 @@ p-value follows.
 ```bash
 conda env create -f environment.yml && conda activate vesicletrack
 pip install -e .
-pytest -q                      # 29 tests, ~1 min
+pytest -q                      # 66 tests, ~1.5 min
 ```
 
 or
@@ -103,8 +106,10 @@ python examples/make_synthetic.py           # 24 static + 6 movers, known truth,
 python -m vesicletrack.cli examples/synthetic.tif --dt 0.05 -o examples/output
 ```
 
-Recovers all 30 vesicles and exactly the 6 planted movers, p = 0.01 against p = 1.00
-for the static ones:
+Recovers all 30 vesicles and exactly the 6 planted movers, p = 0.005 against
+p = 1.00 for the static ones. This is `vesicles_filtered.csv`; `vesicles_all.csv` also
+holds the 670 short noise fragments (under 40 observed frames) that the filters
+labelled rather than deleted - none of them scores as a mover.
 
 | class | net | directed | gross | p |
 |---|---|---|---|---|
@@ -243,7 +248,22 @@ Per-vesicle output is capped by `render.max_vesicle_outputs` (default 25, movers
 first) so a dense field cannot emit thousands of files. The cap is recorded in
 `summary.json` rather than applied silently.
 
-### ROI: in and out, never dropped
+### Mask and ROI
+
+Two different questions, two different arguments:
+
+```python
+res = analyse("cell.tif", cfg, mask="cell_outline.tif")     # WHERE to detect
+res = analyse("cell.tif", cfg, rois="soma_and_processes.zip") # how to LABEL what was found
+```
+
+`mask` restricts detection: nothing outside it is ever tracked. Use it for "this cell
+only" when a field holds several. `rois` labels each vesicle by region and keeps the
+rest. Both take the same inputs (ImageJ `.roi`/`.zip`, mask or label images, arrays,
+polygons), and both are applied in **drift-corrected** coordinates - draw them on a
+projection of `Result.stack`, not the raw file, when drift is not negligible.
+
+#### ROI: in and out, never dropped
 
 ```python
 res = analyse("cell.tif", cfg, rois="soma_and_processes.zip")   # ImageJ RoiSet
@@ -335,16 +355,21 @@ vesicletrack/
 ├── examples/
 │   └── make_synthetic.py      ground-truth movie (24 static + 6 movers)
 ├── tests/                     pytest -q
+│   ├── conftest.py            the synthetic movie and a config scaled to it
 │   ├── test_smoke.py          does it get the known answer right?
 │   ├── test_robustness.py     edge cases, odd inputs, every switch
 │   └── test_docs.py           docs cannot drift from the code
 └── src/vesicletrack/
     ├── config.py              parameters, validation, YAML/JSON round-trip
-    ├── io.py                  load stacks (tif/nd2/npy), write tables
+    ├── io.py                  load stacks (tif/nd2/npy), sample sheets, write tables
     ├── preprocess.py          stage drift correction
     ├── detect.py              per-frame spot detection + NMS
-    ├── linking.py             trackpy linking, short-track removal, merge
-    ├── metrics.py             net / gross / directed, null, classification
+    ├── linking.py             trackpy linking, fragment merge, short-track floor
+    ├── metrics.py             net / gross / directed, permutation null, classification
+    ├── size.py                vesicle width, PSF calibration, deconvolution
+    ├── roi.py                 masks and regions: load, label, assign
+    ├── filters.py             label (never delete) by the `filters:` rules
+    ├── aggregate.py           vesicle -> video -> group tables, n = videos
     ├── render.py              three-panel, per-vesicle images, videos
     ├── pipeline.py            analyse() / analyse_many() / Result
     └── cli.py                 command line

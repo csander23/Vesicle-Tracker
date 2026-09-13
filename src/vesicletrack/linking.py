@@ -97,25 +97,3 @@ def merge_colocated(tr: pd.DataFrame, radius: float, max_gap: int = 15,
     codes = {p: k for k, p in enumerate(sorted(out.particle.unique()))}
     out["particle"] = out.particle.map(codes)
     return out
-
-
-def gap_report(tr: pd.DataFrame) -> pd.DataFrame:
-    """Per-track gap statistics: how much of the span was actually observed.
-
-    A track's SPAN (last - first + 1) and its OBSERVED frame count are different numbers
-    whenever the linker bridged a dropout, and on real data they differ a lot - medians of
-    398 vs 167 frames in testing. Reporting only span describes a vesicle as present for
-    frames in which nothing was detected, so both are carried through to the output.
-    """
-    rows = []
-    for p, d in tr.groupby("particle"):
-        f = np.sort(d.frame.values.astype(np.int64))
-        span = int(f[-1] - f[0] + 1)
-        gaps = np.diff(f) - 1
-        gaps = gaps[gaps > 0]
-        rows.append(dict(particle=int(p), span_frames=span, observed_frames=int(len(f)),
-                         missing_frames=int(span - len(f)),
-                         frac_observed=float(len(f) / span),
-                         n_gaps=int(len(gaps)),
-                         longest_gap=int(gaps.max()) if len(gaps) else 0))
-    return pd.DataFrame(rows)

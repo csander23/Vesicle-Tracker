@@ -66,6 +66,54 @@ import numpy as np
 import pandas as pd
 
 
+def measure_tracks(stack: np.ndarray, tracks: pd.DataFrame, cfg) -> pd.DataFrame:
+    """Per-track size, measured on a sample of each track's own frames.
+
+    Frames are sampled evenly within each track (cap: size.max_frames) and then grouped
+    BY FRAME, so every spot in a frame is measured in one vectorised call rather than
+    one call per spot. Sizing all 1350 frames of a long track buys no precision that
+    200 evenly spaced frames do not already give.
+
+    The PSF width used for deconvolution is size.psf_sigma_px when set, otherwise the
+    `psf_from_percentile` percentile of every width measured in this movie (see the
+    module docstring for why the data beat theory here). The value used is written to
+    every row as psf_sigma_used_px.
+    """
+    if not cfg.size.enabled or not len(tracks):
+        return pd.DataFrame(columns=["particle"])
+    cap = max(1, int(cfg.size.max_frames))
+    picks = []
+    for p, d in tracks.groupby("particle", sort=False):
+        d = d.sort_values("frame")
+        idx = (np.linspace(0, len(d) - 1, min(cap, len(d))).round().astype(int)
+               if len(d) > cap else np.arange(len(d)))
+        picks.append(d.iloc[np.unique(idx)])
+    sel = pd.concat(picks, ignore_index=True)
+
+    per_frame = []
+    for fr, d in sel.groupby("frame", sort=True):
+        sz = measure_frame(stack[int(fr)], d.x.values, d.y.values, cfg)
+        sz["particle"] = d.particle.values
+        per_frame.append(sz)
+    allsz = pd.concat(per_frame, ignore_index=True)
+
+    psf = cfg.size.psf_sigma_px
+    if psf is None:
+        psf = estimate_psf_sigma(allsz.sigma_px.values, cfg.size.psf_from_percentile)
+    rows = []
+    for p, d in allsz.groupby("particle", sort=True):
+        rec = summarise_track(d, cfg)
+        rec["particle"] = int(p)
+        rows.append(rec)
+    out = pd.DataFrame(rows)
+    dec, lim = deconvolve(out.sigma_px.values, psf)
+    out["sigma_deconv_px"] = dec
+    out["at_diffraction_limit"] = lim
+    out["psf_sigma_used_px"] = psf
+    out["fwhm_px"] = out.sigma_px * 2.3548200450309493
+    return out
+
+
 def measure_frame(img: np.ndarray, x: np.ndarray, y: np.ndarray, cfg) -> pd.DataFrame:
     """Second-moment width for every spot in one frame. Vectorised over spots.
 

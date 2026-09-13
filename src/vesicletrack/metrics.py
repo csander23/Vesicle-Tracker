@@ -55,8 +55,7 @@ import numpy as np
 import pandas as pd
 
 
-def coarse(x, y, f, tau: int, min_occupancy: int | None = None,
-           occupancy_frac: float | None = None):
+def coarse(x, y, f, tau: int, occupancy_frac: float):
     """Average positions within tau-frame windows. Returns (cx, cy, ct, n_per_window).
 
     Two things here are deliberate and were not in the first version.
@@ -74,24 +73,24 @@ def coarse(x, y, f, tau: int, min_occupancy: int | None = None,
     remove. Worse, it made the metric track detection dropout rather than motion: on
     purely stationary simulated vesicles, `directed` rose from 0.117 to 0.164 as the
     observed fraction fell from 1.00 to 0.42, with no change in the underlying motion.
-    Windows with fewer than `min_occupancy` observed frames are dropped, so every
-    surviving centroid is averaged over a comparable number of samples.
-    `n_per_window` is returned so callers can see what was kept.
+    Windows holding fewer than `round(tau * occupancy_frac)` observed frames (at least
+    1) are dropped, so every surviving centroid is averaged over a comparable number
+    of samples. `n_per_window` is returned so callers can see what was kept.
 
-    The default floor is `metrics.min_window_occupancy` (0.25) of tau, NOT half of it.
-    Half was measured to be too strict for real data: genuine vesicles here are only
-    about 42% observed, so a 90-frame window holds roughly 38 detections and a floor
-    of 45 discarded windows belonging to perfectly good vesicles - taking the fraction
-    of tracks with a measurable `directed` from 18% down to 8%. A quarter sits safely
-    below the real observation rate while still excluding the one- and two-frame
-    windows that carry full localisation noise.
+    `occupancy_frac` is `metrics.min_window_occupancy` and has no default here on
+    purpose: every caller - scoring, rendering, tests - must coarse-grain with the
+    same floor, or the drawn coarse path stops matching the measured one. The shipped
+    value is 0.25, NOT half. Half was measured to be too strict for real data: genuine
+    vesicles here are only about 42% observed, so a 90-frame window holds roughly 38
+    detections and a floor of 45 discarded windows belonging to perfectly good
+    vesicles - taking the fraction of tracks with a measurable `directed` from 18%
+    down to 8%. A quarter sits safely below the real observation rate while still
+    excluding the one- and two-frame windows that carry full localisation noise.
     """
     f = np.asarray(f, dtype=np.int64)
     x = np.asarray(x, float)
     y = np.asarray(y, float)
-    if min_occupancy is None:
-        frac = 0.25 if occupancy_frac is None else occupancy_frac
-        min_occupancy = max(1, int(round(tau * frac)))
+    min_occupancy = max(1, int(round(tau * occupancy_frac)))
 
     b = f // tau                                    # absolute grid
     uniq, inv = np.unique(b, return_inverse=True)
@@ -104,7 +103,7 @@ def coarse(x, y, f, tau: int, min_occupancy: int | None = None,
     return cx[keep], cy[keep], ct[keep], counts[keep]
 
 
-def path_at_tau(x, y, f, tau: int, occupancy_frac: float | None = None) -> float:
+def path_at_tau(x, y, f, tau: int, occupancy_frac: float) -> float:
     """L(tau): path length measured at timescale tau. The directed distance.
 
     Returns NaN - not 0.0 - when the track spans fewer than two tau-windows.
@@ -117,10 +116,12 @@ def path_at_tau(x, y, f, tau: int, occupancy_frac: float | None = None) -> float
     reason, so check_ordering saw 20 >= 0 >= 0 and passed. NaN makes the gap visible
     and keeps it out of any median.
     """
-    cx, cy, _, _ = coarse(x, y, f, tau, occupancy_frac=occupancy_frac)
-    if len(cx) < 2:
-        return float("nan")
-    return float(np.hypot(np.diff(cx), np.diff(cy)).sum())
+    cx, cy, _, _ = coarse(x, y, f, tau, occupancy_frac)
+    return _path(cx, cy)
+
+
+def _path(cx, cy) -> float:
+    return float(np.hypot(np.diff(cx), np.diff(cy)).sum()) if len(cx) >= 2 else float("nan")
 
 
 def runs(steps: np.ndarray, max_turn_deg: float, min_disp: float, min_steps: int):
@@ -129,46 +130,61 @@ def runs(steps: np.ndarray, max_turn_deg: float, min_disp: float, min_steps: int
     A run continues while the next step turns less than max_turn from the run's current
     heading. Returns (total displacement, n runs kept, longest run, steps inside runs).
 
+    `steps` is (n, 2) for one track, or (P, n, 2) for P tracks with the same number of
+    steps - the permutation null is exactly that shape, so it is scored in one pass
+    down the step axis instead of P separate Python loops. With a batch input each
+    return value is an array of length P. The two forms give bit-identical answers:
+    the per-track arithmetic is the same additions in the same order.
+
     min_steps >= 2 matters: allowing one-step runs makes the total converge on plain
     path length for real and random tracks alike, and the metric loses its contrast
     against the null.
     """
-    n = len(steps)
+    S = np.asarray(steps, float)
+    single = S.ndim == 2
+    if single:
+        S = S[None]
+    P, n, _ = S.shape
+    total = np.zeros(P); longest = np.zeros(P)
+    nkept = np.zeros(P, int); nsteps = np.zeros(P, int)
     if n == 0:
-        return 0.0, 0, 0.0, 0
+        return ((total[0], int(nkept[0]), longest[0], int(nsteps[0])) if single
+                else (total, nkept, longest, nsteps))
     cosmax = np.cos(np.deg2rad(max_turn_deg))
-    total = longest = 0.0
-    nkept = nsteps = 0
-    i = 0
-    while i < n:
-        acc = steps[i].copy()
-        j = i + 1
-        while j < n:
-            h, s = np.hypot(*acc), np.hypot(*steps[j])
-            if h < 1e-9 or s < 1e-9:
-                break
-            if float(acc @ steps[j]) / (h * s) < cosmax:
-                break
-            acc = acc + steps[j]
-            j += 1
-        d = float(np.hypot(*acc))
-        if d >= min_disp and (j - i) >= min_steps:
-            total += d
-            nkept += 1
-            nsteps += j - i
-            longest = max(longest, d)
-        i = j
+    acc = S[:, 0].copy()                    # the run being accumulated, per track
+    start = np.zeros(P, int)                # index of the step that opened it
+
+    def close(j, which):
+        """End the current run at step j for the tracks in `which`; credit if it qualifies."""
+        d = np.hypot(acc[:, 0], acc[:, 1])
+        keep = which & (d >= min_disp) & ((j - start) >= min_steps)
+        total[keep] += d[keep]
+        nkept[keep] += 1
+        nsteps[keep] += (j - start)[keep]
+        longest[keep] = np.maximum(longest[keep], d[keep])
+
+    for j in range(1, n):
+        s = S[:, j]
+        h = np.hypot(acc[:, 0], acc[:, 1]); m = np.hypot(s[:, 0], s[:, 1])
+        ok = (h >= 1e-9) & (m >= 1e-9)
+        cos = np.full(P, -np.inf)
+        np.divide(acc[:, 0] * s[:, 0] + acc[:, 1] * s[:, 1], h * m, out=cos, where=ok)
+        cont = ok & (cos >= cosmax)
+        close(j, ~cont)
+        acc[~cont] = s[~cont]; start[~cont] = j
+        acc[cont] += s[cont]
+    close(n, np.ones(P, bool))
+    if single:
+        return float(total[0]), int(nkept[0]), float(longest[0]), int(nsteps[0])
     return total, nkept, longest, nsteps
 
 
-def _null_directed(steps, rng, nperm, max_turn_deg, min_disp, min_steps):
+def _null_runs(steps, rng, nperm, max_turn_deg, min_disp, min_steps):
+    """Direction-randomised null: every step keeps its length, gets a random heading."""
     mags = np.hypot(steps[:, 0], steps[:, 1])
-    out = np.empty(nperm)
-    for k in range(nperm):
-        th = rng.uniform(0, 2 * np.pi, len(mags))
-        rnd = np.stack([mags * np.cos(th), mags * np.sin(th)], axis=1)
-        out[k] = runs(rnd, max_turn_deg, min_disp, min_steps)[0]
-    return out
+    th = rng.uniform(0, 2 * np.pi, (nperm, len(mags)))
+    rnd = np.stack([mags * np.cos(th), mags * np.sin(th)], axis=2)      # (P, n, 2)
+    return runs(rnd, max_turn_deg, min_disp, min_steps)[0]
 
 
 def gyration(x, y):
@@ -192,7 +208,7 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     # invisible to check_ordering. Mark it invalid instead of guessing.
     finite = np.isfinite(x) & np.isfinite(y)
     if not finite.all():
-        return dict(n_frames=int(len(f)), frame_start=int(f[0]), frame_end=int(f[-1]),
+        return dict(frame_start=int(f[0]), frame_end=int(f[-1]),
                     n_nonfinite=int((~finite).sum()), invalid=True,
                     duration_s=float((f[-1] - f[0]) * cfg.dt_seconds) or cfg.dt_seconds,
                     span_frames=int(f[-1] - f[0] + 1), observed_frames=int(len(f)),
@@ -208,7 +224,7 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     gaps = gaps[gaps > 0]
 
     out = {
-        "n_frames": int(len(f)), "frame_start": int(f[0]), "frame_end": int(f[-1]),
+        "frame_start": int(f[0]), "frame_end": int(f[-1]),
         "duration_s": dur,
         "span_frames": span,
         "observed_frames": int(len(f)),
@@ -220,11 +236,11 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
         "observed_s": float(len(f) * cfg.dt_seconds),
         "net": float(np.hypot(x[-1] - x[0], y[-1] - y[0])),
         "gross": float(np.hypot(np.diff(x), np.diff(y)).sum()),
-        "directed": path_at_tau(x, y, f, m.tau_directed_frames,
-                                occupancy_frac=m.min_window_occupancy),
     }
-    dcx, dcy, _, _ = coarse(x, y, f, m.tau_directed_frames,
-                            occupancy_frac=m.min_window_occupancy)
+    # The coarse timescale, once: `directed` and `net_coarse` are two readings of the
+    # same coarse-grained path, so they must come from the same centroids.
+    dcx, dcy, _, _ = coarse(x, y, f, m.tau_directed_frames, m.min_window_occupancy)
+    out["directed"] = _path(dcx, dcy)
     out["net_coarse"] = (float(np.hypot(dcx[-1] - dcx[0], dcy[-1] - dcy[0]))
                          if len(dcx) >= 2 else float("nan"))
     # Explicit flag so "not measurable at this tau" is a filterable state rather than
@@ -234,8 +250,7 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     out["tau_frames"] = int(m.tau_frames)
     out["tau_directed_frames"] = int(m.tau_directed_frames)
 
-    cx, cy, _, _ = coarse(x, y, f, m.tau_frames,
-                          occupancy_frac=m.min_window_occupancy)
+    cx, cy, _, _ = coarse(x, y, f, m.tau_frames, m.min_window_occupancy)
     nan_keys = ["coarse_path", "runs_total", "runs_null", "runs_excess",
                 "runs_z", "runs_p", "n_runs", "longest_run", "frac_in_runs",
                 "persistence", "max_excursion", "rg", "aniso"]
@@ -253,8 +268,8 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
                    frac_in_runs=nsteps / len(steps))
 
         if m.n_permutations > 0:
-            null = _null_directed(steps, rng, m.n_permutations, m.max_turn_deg,
-                                  m.min_run_disp_px, m.min_run_steps)
+            null = _null_runs(steps, rng, m.n_permutations, m.max_turn_deg,
+                              m.min_run_disp_px, m.min_run_steps)
             sd = null.std(ddof=1)
             out["runs_null"] = float(null.mean())
             out["runs_excess"] = float(total - null.mean())
@@ -311,7 +326,7 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
 EMPTY_SCHEMA = [
     "particle", "klass", "observed_frames", "span_frames", "observed_s", "span_s",
     "frac_observed", "is_censored", "net", "gross", "directed",
-    "directed_measurable", "runs_total", "runs_p", "n_frames", "frame_start",
+    "directed_measurable", "runs_total", "runs_p", "frame_start",
     "frame_end", "duration_s", "missing_frames", "n_gaps", "longest_gap",
     "net_coarse", "coarse_path", "runs_null", "runs_excess", "runs_z", "n_runs",
     "longest_run", "frac_in_runs", "persistence", "max_excursion", "rg", "aniso",
