@@ -1,7 +1,6 @@
 # vesicletrack
 
-Detect, track and score intracellular vesicles in time-lapse microscopy. One config
-file decides everything; the only other input is the movie.
+Detect, track and score intracellular vesicles in live imaging microscopy. 
 
 ```python
 from vesicletrack import Config, analyse
