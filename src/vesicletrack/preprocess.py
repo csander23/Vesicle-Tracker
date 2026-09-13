@@ -1,9 +1,8 @@
 """Stage drift correction.
 
-Sample drift over a minute-long recording moves every vesicle together. Uncorrected it
-adds a common directed component to every track, which is exactly what the directed
-metric is designed to detect - so drift reads as transport, in every vesicle at once.
-Correcting it is not optional for these data.
+Sample drift over a minute-long recording moves every vesicle together. Uncorrected,
+it adds a common directed component to every track, which the directed metric then
+scores as transport in every vesicle at once.
 
 Registration is done on heavily blurred frames so it locks onto static cell structure
 rather than onto the moving vesicles themselves, and the shift series is median
@@ -22,9 +21,9 @@ from skimage.registration import phase_cross_correlation
 def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float]:
     """Return (corrected_stack, shifts, span_px).
 
-    shifts is (T, 2) in (dy, dx). span_px is the total excursion - report it, because a
-    large value on a dataset you believed was stable means the stage moved and the
-    uncorrected metrics would have been wrong.
+    shifts is (T, 2) in (dy, dx). span_px is the total excursion. It is reported
+    because a large value on a dataset believed to be stable means the stage moved and
+    the uncorrected metrics would have been wrong.
     """
     if not cfg.drift.enabled:
         return stack, np.zeros((len(stack), 2), np.float32), 0.0
@@ -36,7 +35,7 @@ def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float
     shifts = np.zeros((len(stack), 2), np.float32)
     if not np.isfinite(ref).all() or float(ref.std()) < 1e-9:
         # A featureless reference (blank or saturated) gives phase correlation nothing
-        # to lock onto; it would return noise. No drift is the honest answer.
+        # to lock onto and it would return noise, so no shift is applied.
         return stack, shifts, 0.0
     for t, frame in enumerate(stack):
         blurred = gaussian_filter(frame.astype(np.float32), sig)
@@ -57,9 +56,9 @@ def correct_drift(stack: np.ndarray, cfg) -> tuple[np.ndarray, np.ndarray, float
     if span < cfg.drift.min_span_px:
         return stack, shifts, span
 
-    # Round ONLY for integer stacks. Rounding a float stack to whole numbers throws
+    # Round only for integer stacks. Rounding a float stack to whole numbers throws
     # away the sub-unit intensity that detection and sizing depend on; on a
-    # normalised 0-1 float movie it collapses every pixel to 0 or 1.
+    # normalised 0-1 float movie it would collapse every pixel to 0 or 1.
     integral = np.issubdtype(stack.dtype, np.integer)
     out = np.empty_like(stack)
     for t, frame in enumerate(stack):

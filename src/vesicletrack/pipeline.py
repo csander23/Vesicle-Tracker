@@ -1,21 +1,21 @@
-"""The whole analysis as one call.
+"""Run the full analysis on one movie.
 
     result = analyse("cell.tif", Config.load("config/default.yaml"))
 
-Everything is decided by the config; the only other input is the path. `analyse`
-returns a Result holding the tracks, the per-vesicle table and the run summary, and
-knows how to write its own outputs. `analyse_many` runs a list of movies, tolerates a
-bad file, and writes the pooled tables at every level.
+The config sets every parameter; the only other input is the path. `analyse` returns
+a Result holding the tracks, the per-vesicle table and the run summary, and can write
+its own outputs. `analyse_many` runs a list of movies, records a failed file instead
+of stopping, and writes the pooled tables at every level.
 
-Order of operations, and why:
+Order of operations:
 
   load -> drift-correct -> detect -> link -> score -> classify -> size -> roi -> filter
 
-Drift correction comes before detection because stage drift moves every vesicle
-together and would otherwise be measured as transport in all of them at once.
-Classification comes after scoring because the mover test is a comparison against each
-vesicle's own permutation null, which needs the metrics first. Filters come last and
-only label, so every earlier stage sees every vesicle.
+Drift correction runs before detection because stage drift moves every vesicle
+together and would otherwise be measured as transport in all of them. Classification
+runs after scoring because the mover test compares each vesicle against its own
+permutation null, which needs the metrics first. Filters run last and only add a
+label, so every earlier stage sees every vesicle.
 """
 from __future__ import annotations
 
@@ -38,9 +38,9 @@ from . import render as _render
 from . import roi as _roi
 from . import size as _size
 
-# Figures a save() may or may not regenerate. Anything here that is not rewritten is
-# removed first, so a figure from an earlier parameter set never sits beside tables
-# it does not belong to.
+# Figures that save() may or may not regenerate. Anything listed here is removed
+# before writing, so a figure from an earlier parameter set is not left next to
+# tables from a different run.
 _FIGURES = ("three_panel.png", "distances.png", "overview.mp4")
 _FIGURE_DIRS = ("vesicles", "vesicle_videos")
 
@@ -88,7 +88,7 @@ class Result:
         cfg = self.config
         out = Path(output_dir or cfg.output_dir) / self.name
         # Two movies with the same stem in different folders would otherwise write to
-        # the same directory and the second would overwrite the first, silently.
+        # the same directory and the second would overwrite the first with no warning.
         if (out / "summary.json").exists():
             try:
                 prev = json.loads((out / "summary.json").read_text()).get("source")
@@ -109,8 +109,8 @@ class Result:
 
         cfg.save(out / "config_used.yaml")
         written["tracks"] = _io.save_table(self.tracks, out / "tracks.parquet")
-        # Two lists per video: everything, and the usable subset. The `all` file is
-        # the one to keep - any filter can be re-derived from it later.
+        # Two tables per movie: every vesicle, and the subset passing the filters. Keep
+        # the `all` file; any filter can be re-derived from it later.
         written["vesicles_all"] = _io.save_table(self.vesicles,
                                                  out / "vesicles_all.csv")
         written["vesicles_filtered"] = _io.save_table(self.filtered,
@@ -164,8 +164,8 @@ class Result:
     def _selection(self) -> pd.DataFrame:
         """Which vesicles get per-vesicle output: movers first, then the longest.
 
-        Capped by render.max_vesicle_outputs so a dense field cannot emit thousands of
-        files. The cap is reported in the summary rather than applied silently.
+        Capped at render.max_vesicle_outputs so a dense field does not produce
+        thousands of files. The cap is recorded in the summary.
         """
         v = self.vesicles
         order = v.assign(_m=(v.klass == "mover").astype(int)).sort_values(
@@ -180,18 +180,19 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
     """Run the full pipeline on one movie.
 
     rois    ROI source (see roi.load_rois): ImageJ .roi/.zip, label or mask image,
-            array, or {name: polygon}. Vesicles are LABELLED by region; those outside
-            every region are kept and labelled "outside", not discarded.
-    mask    where to DETECT: a boolean array, or any file roi.load_rois accepts.
-            Detections outside it never exist, so use it for "this cell only" (a
-            traced outline) and `rois` for "which part of the cell" (soma/process).
-    **meta  extra columns to stamp on every row (batch=, group=, genotype=, ...) so
-            results from many movies can be pooled without re-parsing filenames.
+            array, or {name: polygon}. Vesicles are labelled by region; those outside
+            every region are kept and labelled "outside".
+    mask    where to detect: a boolean array, or any file roi.load_rois accepts.
+            Detections outside it are dropped, so use it to restrict analysis to one
+            cell (a traced outline) and `rois` to label parts of the cell
+            (soma/process).
+    **meta  extra columns stamped on every row (batch=, group=, genotype=, ...) so
+            results from many movies can be pooled without parsing filenames.
 
-    Both `rois` and `mask` are applied in DRIFT-CORRECTED coordinates - the stack is
-    aligned to the median of the first `drift.reference_frames` frames before either
-    is used. Draw them on `Result.stack[0]` or a projection of the corrected stack,
-    not on the raw file, when the measured drift is not negligible.
+    Both `rois` and `mask` are applied after drift correction. The stack is aligned to
+    the median of the first `drift.reference_frames` frames before either is used, so
+    when the measured drift is not negligible, draw them on `Result.stack[0]` or a
+    projection of the corrected stack rather than on the raw file.
     """
     cfg = config or Config()
     cfg.validate()
@@ -286,7 +287,7 @@ def analyse_many(paths, config: Config | None = None, output_dir=None,
     """Run over several movies; returns one summary row per movie.
 
     A failure on one movie is recorded in its row's `error` column and the batch
-    continues - one unreadable file should not cost the whole run.
+    continues, so one unreadable file does not stop the run.
 
     sheet   {file name: {column: value}} metadata stamped on each movie's vesicles;
             io.read_sample_sheet builds it from a CSV
@@ -296,8 +297,7 @@ def analyse_many(paths, config: Config | None = None, output_dir=None,
 
     With save=True each movie gets its own folder under output_dir, and the pooled
     tables at every level (aggregate.write_all) plus batch_summary.csv are written
-    beside them - the CSVs the user analyses come from the same call that produced
-    the per-movie output.
+    beside them.
     """
     cfg = config or Config()
     out = Path(output_dir or cfg.output_dir)

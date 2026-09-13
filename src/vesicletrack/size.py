@@ -4,61 +4,56 @@ Measured as the intensity-weighted second moment of a small window around the sp
 
     sigma_meas = sqrt( 0.5 * (Sxx + Syy) ),    Sxx = sum w dx^2 / sum w
 
-with w the background-subtracted intensity, negatives clipped to zero. This is chosen
-over per-spot Gaussian fitting because it is a closed-form sum: fitting hundreds of
-spots across a thousand frames with scipy.curve_fit takes minutes per movie, while the
-moment is vectorised over all spots in a frame at once and is within a few percent of
-the fitted sigma for well-separated spots.
+with w the background-subtracted intensity, negatives clipped to zero. This is used
+instead of per-spot Gaussian fitting because it is a closed-form sum: fitting hundreds
+of spots across a thousand frames with scipy.curve_fit takes minutes per movie, while
+the moment is vectorised over all spots in a frame at once and is within a few percent
+of the fitted sigma for well-separated spots.
 
-READ THIS BEFORE USING THE NUMBERS
-----------------------------------
+Caveats
+-------
 A vesicle is smaller than the diffraction limit. What the microscope records is the
-PSF, essentially regardless of the vesicle's true size, so `sigma_px` is mostly an
-instrument property. Reporting it as "vesicle size" without qualification is wrong.
-
-The honest treatment, and what this module does:
+PSF, more or less regardless of the vesicle's true size, so `sigma_px` is mostly an
+instrument property and should not be reported as "vesicle size" without
+qualification. Three columns are produced:
 
   sigma_px          what was measured. Includes the PSF.
   sigma_deconv_px   sqrt(sigma_meas^2 - sigma_psf^2), the width in excess of the PSF.
-                    This is the closest thing to a true size, and it is only meaningful
-                    when the object is genuinely resolvable.
+                    This is the closest thing to a true size, and it only means
+                    something when the object is resolvable.
   at_diffraction_limit  True when sigma_meas <= sigma_psf, i.e. the subtraction under
-                    the square root went negative. sigma_deconv_px is then 0, NOT NaN
-                    and NOT a small positive number: the object is unresolved and its
-                    size is unknown, bounded above by roughly the PSF width.
+                    the square root went negative. sigma_deconv_px is then 0 rather
+                    than NaN or a small positive number: the object is unresolved and
+                    its size is unknown, bounded above by roughly the PSF width.
 
-If most vesicles come back with at_diffraction_limit True, the correct conclusion is
-that this data cannot size them - not that they are all the same size. Use the flag,
-do not average over it.
+If most vesicles come back with at_diffraction_limit True, the conclusion is that this
+data cannot size them, not that they are all the same size. Use the flag rather than
+averaging over it.
 
-CALIBRATE THE PSF FROM THE DATA, NOT FROM THEORY. The second moment is biased upward
-by noise: on synthetic spots generated with sigma exactly 1.30 px it measures 1.394,
-and deconvolving against the theoretical 1.30 then reports 0.50 px of "size" for
-objects that have none. Estimating sigma_psf as a low percentile of the measured
-distribution in the same movie (config: psf_from_percentile) absorbs that bias,
-because the smallest objects in the field ARE point sources measured the same way.
-Deconvolved size then means "larger than the smallest thing here", which is a claim
-the data can actually support.
+The PSF is calibrated from the data rather than from theory. The second moment is
+biased upward by noise: on synthetic spots generated with sigma exactly 1.30 px it
+measures 1.394, and deconvolving against the theoretical 1.30 reports 0.50 px of
+"size" for objects that have none. Estimating sigma_psf as a low percentile of the
+measured distribution in the same movie (config: psf_from_percentile) absorbs that
+bias, because the smallest objects in the field are point sources measured the same
+way. Deconvolved size then means "larger than the smallest thing here", which the
+data can support.
 
-THERE IS STILL A NOISE FLOOR, measured on this pipeline:
+There is still a noise floor, measured on this pipeline:
 
-    synthetic point sources, true size ZERO   -> sigma 1.394 px, deconvolved 0.41 px
+    synthetic point sources, true size zero   -> sigma 1.394 px, deconvolved 0.41 px
     real Rab5 endosomes, same settings        -> sigma 2.010 px, deconvolved 0.99 px
 
-A homogeneous population of point sources cannot be distinguished from a population of
-slightly-larger-than-point objects, because the low percentile and the median differ by
-noise alone. Treat ~0.4 px of deconvolved width as indistinguishable from zero here, and
-recalibrate that floor for your own optics by running the pipeline on sub-resolution
-beads or on examples/make_synthetic.py.
+A population of point sources cannot be told apart from a population of slightly
+larger objects, because the low percentile and the median differ by noise alone. Treat
+~0.4 px of deconvolved width as indistinguishable from zero here, and recalibrate that
+floor for other optics by running the pipeline on sub-resolution beads or on
+examples/make_synthetic.py.
 
-PREFER sigma_px FOR COMPARISONS. When two conditions are imaged identically the PSF
+For comparisons between conditions imaged identically, use sigma_px. The PSF
 contribution is common to both, so a difference in raw sigma_px is real and needs no
-deconvolution. Deconvolved values are for the harder question of absolute size, and
-they carry the floor above.
-
-Comparisons ACROSS conditions imaged identically are still informative even when every
-object is unresolved, because the PSF contribution is common: a shift in sigma_px
-between genotypes is real even if no single value is a true diameter.
+deconvolution, even when every object is unresolved. Deconvolved values are for the
+harder question of absolute size, and they carry the floor above.
 """
 from __future__ import annotations
 
@@ -70,9 +65,9 @@ def measure_tracks(stack: np.ndarray, tracks: pd.DataFrame, cfg) -> pd.DataFrame
     """Per-track size, measured on a sample of each track's own frames.
 
     Frames are sampled evenly within each track (cap: size.max_frames) and then grouped
-    BY FRAME, so every spot in a frame is measured in one vectorised call rather than
-    one call per spot. Sizing all 1350 frames of a long track buys no precision that
-    200 evenly spaced frames do not already give.
+    by frame, so every spot in a frame is measured in one vectorised call rather than
+    one call per spot. Sizing all 1350 frames of a long track adds no precision beyond
+    what 200 evenly spaced frames give.
 
     The PSF width used for deconvolution is size.psf_sigma_px when set, otherwise the
     `psf_from_percentile` percentile of every width measured in this movie (see the
@@ -139,8 +134,8 @@ def measure_frame(img: np.ndarray, x: np.ndarray, y: np.ndarray, cfg) -> pd.Data
     cols = xic[:, None, None] + dx[None]
     win = img[rows, cols].astype(np.float64)                  # (n, K, K)
 
-    # Background from the outer ring of the window: local, and immune to a neighbouring
-    # spot sitting in one corner because it is a median, not a mean.
+    # Background from the outer ring of the window: local, and a median rather than a
+    # mean, so a neighbouring spot in one corner does not shift it.
     ring = (np.abs(dy) == r) | (np.abs(dx) == r)
     bg = np.median(win[:, ring], axis=1)
     peak = win.max(axis=(1, 2))
@@ -169,8 +164,8 @@ def estimate_psf_sigma(sigma_meas: np.ndarray, percentile: float = 5.0) -> float
     """PSF width estimated from the data: a low percentile of measured widths.
 
     The smallest objects in a field are point sources, and measuring them with the same
-    biased estimator as everything else means the bias cancels in the subtraction. This
-    is preferable to a theoretical PSF width for exactly that reason.
+    biased estimator as everything else means the bias cancels in the subtraction. That
+    is why it is preferred to a theoretical PSF width.
     """
     v = np.asarray(sigma_meas, float)
     v = v[np.isfinite(v)]
@@ -183,8 +178,8 @@ def deconvolve(sigma_meas: np.ndarray, sigma_psf: float):
     """Width in excess of the PSF, and a flag for objects that are unresolved.
 
     Returns (sigma_deconv, at_limit). Where the object is unresolved the deconvolved
-    width is 0 and at_limit is True - it is not a small number and not NaN, because
-    "unresolved" is a real, reportable state, not a missing value.
+    width is 0 and at_limit is True, rather than a small number or NaN: unresolved is
+    a reportable state, not a missing value.
     """
     sigma_meas = np.asarray(sigma_meas, float)
     var = sigma_meas ** 2 - float(sigma_psf) ** 2
@@ -198,9 +193,10 @@ def deconvolve(sigma_meas: np.ndarray, sigma_psf: float):
 def summarise_track(sizes: pd.DataFrame, cfg) -> dict:
     """Per-track size from its per-frame measurements.
 
-    Median, not mean: a single frame where a neighbouring vesicle drifts into the
-    window inflates the mean and leaves the median alone. Frames measured at the image
-    edge are excluded - their window is truncated and the width is biased.
+    The median is used rather than the mean: a single frame where a neighbouring
+    vesicle drifts into the window inflates the mean and leaves the median alone.
+    Frames measured at the image edge are excluded, since their window is truncated
+    and the width is biased.
     """
     s = sizes[~sizes.edge] if "edge" in sizes else sizes
     v = s.sigma_px.to_numpy(float)

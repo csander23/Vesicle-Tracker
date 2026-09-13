@@ -2,24 +2,25 @@
 
 Three kinds of output, each switchable in `render:` config:
 
-  three_panel          RAW | ALL VESICLES | CLASSIFIED, side by side on one image.
-                       The middle panel answers "did detection find the vesicles",
-                       the right one answers "did it classify them sensibly" - the
-                       two failure modes worth checking before trusting any number.
+  three_panel          raw | all vesicles | classified, side by side on one image.
+                       The middle panel shows whether detection found the vesicles,
+                       the right one whether they were classified sensibly. Check
+                       both before trusting any number.
 
   per-vesicle images   one trajectory per image, annotated with its net, gross and
                        directed distances and its permutation p. The three distances
-                       are drawn as well as printed: net as a straight arrow
-                       start->end, directed as the coarse-grained polyline, gross as
-                       the raw trace. Seeing all three on the same axes is the fastest
-                       way to understand why they differ.
+                       are drawn as well as printed: net as a straight arrow from
+                       start to end, directed as the coarse-grained polyline, gross
+                       as the raw trace. Seeing all three on the same axes shows why
+                       they differ.
 
   videos               per-vesicle crops and/or a whole-field overview, written via
                        ffmpeg with a solid (not fading) trail of the last
                        `trail_frames` acquisition frames.
 
-Display uses a percentile stretch shared across every frame of a stack, so brightness
-changes in a video are real and not the renderer re-levelling each frame.
+Display uses a percentile stretch shared across every frame of a stack, so a
+brightness change within a video is in the data and not the renderer re-levelling
+each frame.
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ UNKNOWN_COLOR = "#aaaaaa"
 
 
 def klass_color(k) -> str:
-    """Never raise on an unfamiliar label. A new class must not kill the renderer."""
+    """Fallback colour for an unfamiliar label, so a new class does not break rendering."""
     return KLASS_COLOR.get(k, UNKNOWN_COLOR)
 
 
@@ -58,7 +59,7 @@ def to_uint8(img: np.ndarray, lo: float, hi: float) -> np.ndarray:
 
 # -------------------------------------------------------------- three panel
 def three_panel(stack, tracks, vesicles, cfg, out_path, title=""):
-    """RAW | ALL VESICLES | CLASSIFIED. Returns the written path."""
+    """Raw | all vesicles | classified. Returns the written path."""
     lo, hi = stretch(stack, cfg.render.percentiles)
     proj = to_uint8(stack.max(axis=0), lo, hi)
     kl = dict(zip(vesicles.particle, vesicles.klass)) if len(vesicles) else {}
@@ -115,9 +116,9 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 5.2), facecolor="white",
                            gridspec_kw={"width_ratios": [1, 1]})
-    # imshow's extent addresses pixel EDGES; x/y are pixel CENTRES. Without the half
-    # pixel the trajectory sits half a pixel off the image it is drawn on - small, but
-    # visible at these crops and exactly the kind of thing a reader tries to interpret.
+    # imshow's extent addresses pixel edges; x/y are pixel centres. Without the half
+    # pixel offset the trajectory sits half a pixel off the image it is drawn on, which
+    # is visible at these crop sizes.
     ax[0].imshow(crop, cmap="gray", interpolation="nearest",
                  extent=[x0 - 0.5, x1 - 0.5, y1 - 0.5, y0 - 0.5])
     ax[0].plot(x, y, lw=0.8, color="#ffdc00", alpha=0.8, label="gross (raw path)")
@@ -144,7 +145,7 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
         f"net rate       {row.net_rate * k:7.3f} {unit}/s",
     ]
     if not pd.isna(row.get("runs_p", np.nan)):
-        # Labelled as testing runs_total, because that is what it tests - it is NOT
+        # Labelled as testing runs_total, because that is what it tests. It is not
         # the p-value of the `directed` column above it.
         lines += ["", f"runs total     {row.runs_total * k:7.2f} {unit}",
                   f"  permutation p  {row.runs_p:.3f}",
@@ -163,7 +164,7 @@ def vesicle_image(stack, track, row, cfg, out_path, pad: int = 24):
 
 
 def distance_summary(vesicles, cfg, out_path):
-    """Net / directed / gross across all vesicles - the ordering, made visible."""
+    """Net / directed / gross across all vesicles, so the ordering can be seen."""
     unit, k = ("µm", cfg.um_per_px) if cfg.um_per_px else ("px", 1.0)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.4), facecolor="white")
     for col, c in [("gross", "#ffb700"), ("directed", "#2ecc40"), ("net", "#ff4136")]:
@@ -198,7 +199,8 @@ def resolve_ffmpeg(exe: str) -> str | None:
     """Find ffmpeg: an explicit path, then PATH, then next to the running python.
 
     The last case matters for conda envs, where ffmpeg is installed inside the env and
-    is NOT on PATH unless the env is activated - the usual situation in a notebook.
+    is not on PATH unless the env is activated, which is the usual situation in a
+    notebook.
     """
     p = Path(exe)
     if p.is_absolute() and p.exists():
@@ -241,7 +243,7 @@ def _write_video(frames, out_path, fps, exe):
            "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264",
            "-pix_fmt", "yuv420p", str(out_path)]
     # A present-but-broken ffmpeg raises BrokenPipeError mid-write. That must not kill
-    # save() after the whole analysis has already run - the tables are the valuable
+    # save() after the whole analysis has already run: the tables are the valuable
     # output and they are already on disk.
     try:
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -310,10 +312,10 @@ def overview_video(stack, tracks, vesicles, cfg, out_path):
     for t in range(0, len(stack), cfg.render.frame_step):
         rgb = np.repeat(to_uint8(stack[t], lo, hi)[:, :, None], 3, axis=2).copy()
         for xx, yy, c, p in by_frame.get(t, []):
-            # Truncate by FRAME NUMBER, not by list length. Because the overview is
-            # sampled every `frame_step` frames, a length-based cut made trail_frames
+            # Truncate by frame number, not by list length. The overview is sampled
+            # every `frame_step` frames, so a length-based cut would make trail_frames
             # mean `trail_frames * frame_step` acquisition frames here while meaning
-            # real frames in vesicle_video - the same parameter, two different lengths.
+            # acquisition frames in vesicle_video.
             h = hist.setdefault(p, [])
             h.append((t, xx, yy))
             cutoff = t - max(cfg.render.trail_frames, 0)

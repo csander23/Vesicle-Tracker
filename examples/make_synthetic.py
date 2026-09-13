@@ -7,13 +7,12 @@ Contains, on a noisy background:
   optional global drift, so drift correction can be checked
 
 Positions are rejection-sampled so that no two vesicles come within MIN_SEP of each
-other at ANY frame - a mover's whole path is checked, not just its start. Without that
-guarantee a mover passing close to a static vesicle causes an identity swap in the
-linker, and the fixture stops being a fixture: the "correct" answer changes with the
-field size.
+other at any frame; a mover's whole path is checked, not just its start. Without that,
+a mover passing close to a static vesicle causes an identity swap in the linker and
+the expected answer changes with the field size.
 
-Because the truth is known, this is what to run after changing a parameter: the movers
-should come back as movers and the static ones should not.
+Because the truth is known, run this after changing a parameter: the movers should
+come back as movers and the static ones should not.
 
   python examples/make_synthetic.py [out.tif]
 """
@@ -24,7 +23,7 @@ import tifffile
 
 T, H, W = 400, 160, 160
 N_STATIC, N_MOVER = 24, 6
-MIN_SEP = 14.0           # px between any two vesicles, over the WHOLE movie
+MIN_SEP = 14.0           # px between any two vesicles, over the whole movie
 PSF, AMP, BG, NOISE = 1.3, 900.0, 300.0, 25.0
 JITTER = 0.25            # px, localisation-scale wobble on every spot
 MOVER_SPEED = 0.035      # px/frame -> 14 px over the movie

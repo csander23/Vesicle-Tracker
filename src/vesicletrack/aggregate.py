@@ -4,30 +4,30 @@ The data are nested: vesicle -> video (one cell) -> whatever grouping the experi
 has (genotype, batch, treatment). This module produces one table per level plus a tidy
 long-format file for plotting.
 
-    vesicles_all.csv      one row per VESICLE, nothing removed, every metric
+    vesicles_all.csv      one row per vesicle, nothing removed, every metric
     vesicles_filtered.csv the subset passing filters
-    per_video.csv         one row per VIDEO
-    per_<key>.csv         one row per group, batch, genotype ... whatever you name
+    per_video.csv         one row per video
+    per_<key>.csv         one row per group, batch, genotype, or whatever key you name
     long.csv              tidy: level, <metadata columns>, metric, value
 
 Metadata columns are whatever was stamped on the vesicles (analyse(..., genotype=...)
 or a sample sheet). Nothing here knows their names: every metadata key travels from
-the Result to every level unchanged, so `--by mouse` works the moment a `mouse`
+the Result to every level unchanged, so `--by mouse` works as soon as a `mouse`
 column exists.
 
-WHY VIDEO IS THE UNIT THAT MATTERS
+Why video is the unit that matters
 ----------------------------------
-Vesicles within one cell are not independent - they share a cell, a transfection, a
+Vesicles within one cell are not independent: they share a cell, a transfection, a
 field of view and a focal plane. Treating each vesicle as a replicate inflates n by a
-factor of hundreds and produces significance that will not survive a nested analysis.
+factor of hundreds and gives significance that will not survive a nested analysis.
 
-So group-level statistics here are computed ACROSS VIDEOS, from video medians: the
-`n` reported at group level is the number of videos, never the number of vesicles, and
-`sem` is the standard error of the video values. The per-vesicle count is still
-reported, as `n_vesicles`, but it is never used as the sample size.
+Group-level statistics are therefore computed across videos, from video medians. The
+`n` reported at group level is the number of videos, and `sem` is the standard error
+of the video values. The per-vesicle count is reported as `n_vesicles` but is not
+used as the sample size.
 
-If you want per-vesicle statistics anyway - for a distribution shape, say - use
-`vesicles_all.csv` directly and say plainly in the methods that vesicles were pooled.
+If you want per-vesicle statistics anyway (for a distribution shape, say), use
+`vesicles_all.csv` directly and state in the methods that vesicles were pooled.
 """
 from __future__ import annotations
 
@@ -36,9 +36,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Metrics rolled up per video. Median per vesicle-level metric: these distributions are
-# heavily right-skewed (a few large excursions), so a mean per video is dragged by
-# outliers that a median ignores.
+# Metrics rolled up per video. The median of each vesicle-level metric is used: these
+# distributions are heavily right-skewed (a few large excursions), so a per-video mean
+# is pulled by outliers that a median ignores.
 DEFAULT_METRICS = ["net", "gross", "directed", "net_rate", "gross_rate",
                    "directed_rate", "observed_frames", "span_frames", "observed_s",
                    "span_s", "frac_observed", "n_gaps", "longest_gap",
@@ -60,7 +60,7 @@ def summarise_video(vesicles: pd.DataFrame, name: str | None = None,
 
     use_filtered: summarise only the vesicles passing the filters (the usual choice).
     The unfiltered count is still reported as n_vesicles_all, with n_pass / n_fail,
-    so how much the filter removed is always visible.
+    so how much the filter removed can be seen.
     """
     metrics = metrics or DEFAULT_METRICS
     rec: dict = {"video": name, **(meta or {})}
@@ -107,11 +107,11 @@ def per_video(results, metrics: list | None = None,
 
 def per_group(video_table: pd.DataFrame, by: str | list, metrics: list | None = None
               ) -> pd.DataFrame:
-    """Aggregate VIDEO rows to a grouping. n is the number of VIDEOS, not vesicles.
+    """Aggregate video rows to a grouping. n is the number of videos, not vesicles.
 
-    Each metric gets mean, sd, sem and n across videos. `sem` here is the quantity to
-    put on a bar chart; a sem computed across vesicles would be roughly sqrt(n_vesicles)
-    times too small and is not offered.
+    Each metric gets mean, sd, sem and n across videos. `sem` here is the value to put
+    on a bar chart. A sem computed across vesicles would be roughly sqrt(n_vesicles)
+    times too small, so it is not offered.
     """
     by = [by] if isinstance(by, str) else list(by)
     missing = [b for b in by if b not in video_table.columns]
@@ -144,8 +144,8 @@ def per_group(video_table: pd.DataFrame, by: str | list, metrics: list | None = 
 def to_long(video_table: pd.DataFrame, id_cols: list | None = None) -> pd.DataFrame:
     """Tidy long format for plotting: one row per (video, metric).
 
-    id_cols are the identifier columns - `video` plus the metadata. Pass them when
-    known (write_all does); the fallback treats every non-numeric column as an
+    id_cols are the identifier columns: `video` plus the metadata. Pass them when
+    known (write_all does). The fallback treats every non-numeric column as an
     identifier, which misfiles numeric metadata such as batch=3 as a metric.
     """
     if id_cols is None:
@@ -163,8 +163,8 @@ def write_all(results, output_dir, by=None, metrics: list | None = None,
               use_filtered: bool = True) -> dict:
     """Write every level to CSV. Returns {name: path}.
 
-    `by` is the grouping column(s) - e.g. "genotype" or ["batch", "genotype"]. Omit it
-    and only the vesicle and video levels are written.
+    `by` is the grouping column(s), e.g. "genotype" or ["batch", "genotype"]. If it is
+    omitted, only the vesicle and video levels are written.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

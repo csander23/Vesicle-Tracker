@@ -1,4 +1,4 @@
-"""Regions of interest: where in the image each vesicle lives.
+"""Regions of interest: which region of the image each vesicle is in.
 
 Accepts ROIs from any of:
 
@@ -11,17 +11,16 @@ Accepts ROIs from any of:
 Everything is converted to one int label array, 0 meaning "outside every ROI", plus a
 list of names.
 
-NOTHING IS DISCARDED. Vesicles outside every ROI are tracked, measured and reported
-exactly like the rest, labelled `outside`. That is deliberate: "outside" is usually a
-real comparison group (cytoplasm vs soma, cell vs background), and a pipeline that
-silently drops those vesicles cannot answer the question the ROI was drawn to ask. To
-actually restrict the analysis, filter on the `roi` column afterwards - the filtered
-output does exactly this when `filters.rois` is set.
+Nothing is discarded. Vesicles outside every ROI are tracked, measured and reported
+like the rest, labelled `outside`. "Outside" is usually a real comparison group
+(cytoplasm vs soma, cell vs background), and dropping those vesicles would make that
+comparison impossible. To restrict the analysis, filter on the `roi` column
+afterwards. The filtered output does this when `filters.rois` is set.
 
-A vesicle that MOVES between regions is assigned by majority of its observed frames,
-and flagged with `roi_changed` and `roi_frac` so the ambiguous ones can be found. The
-alternative - assigning by first frame - silently mislabels exactly the motile vesicles
-that a transport study cares most about.
+A vesicle that moves between regions is assigned by majority of its observed frames,
+and flagged with `roi_changed` and `roi_frac` so the ambiguous ones can be found.
+Assigning by first frame instead would mislabel the motile vesicles, which are the
+ones a transport study is about.
 """
 from __future__ import annotations
 
@@ -138,9 +137,9 @@ def assign_tracks(tracks: pd.DataFrame, labels: np.ndarray,
                   names: list[str]) -> pd.DataFrame:
     """One row per particle: roi, roi_frac, roi_changed, n_rois_visited.
 
-    Assignment is by MAJORITY of observed frames. `roi_frac` is the fraction of frames
-    in the assigned region, so a value near 0.5 marks a vesicle that genuinely straddles
-    a boundary and should probably not be counted as either.
+    Assignment is by majority of observed frames. `roi_frac` is the fraction of frames
+    in the assigned region, so a value near 0.5 marks a vesicle that straddles a
+    boundary and probably should not be counted as either.
     """
     lut = [OUTSIDE] + list(names)
     if not len(tracks):
@@ -163,7 +162,7 @@ def assign_tracks(tracks: pd.DataFrame, labels: np.ndarray,
 
 
 def coverage(labels: np.ndarray, names: list[str]) -> dict:
-    """Fraction of the frame occupied by each region - a sanity check on the ROI."""
+    """Fraction of the frame occupied by each region (a sanity check on the ROI)."""
     if labels is None or not labels.size:
         return {}
     tot = labels.size

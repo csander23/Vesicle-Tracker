@@ -2,8 +2,9 @@
 
 Input is a 2D time series: shape (T, Y, X). TIFF is read with tifffile; ND2 is read
 with nd2 or aicsimageio if either is installed. A stack with a channel or z axis must
-be reduced before it gets here - `load_stack` will say so rather than guess which axis
-is time, because guessing wrong silently produces tracks of nothing.
+be reduced before it gets here. `load_stack` raises an error rather than guessing
+which axis is time, because a wrong guess produces tracks of nothing with no
+indication that anything went wrong.
 """
 from __future__ import annotations
 
@@ -39,10 +40,9 @@ def load_stack(path: str | Path, channel: int | None = None,
     arr = np.asarray(arr)
     orig_shape = arr.shape
     if arr.ndim == 5:                                  # T,C,Z,Y,X
-        # Handled fully here and RETURNED. Previously this fell through into the 4-D
-        # branch below, where `channel` was still set and got applied a second time -
-        # as a z index - so the loader silently returned a single z-plane whose index
-        # happened to equal the channel number, discarding z_project entirely.
+        # Handled fully here and returned. If this fell through to the 4-D branch
+        # below, `channel` would be applied a second time as a z index and the loader
+        # would return a single z-plane, ignoring z_project.
         if channel is None or z_project is None:
             raise ValueError(
                 f"{path.name} has shape {orig_shape} (T, C, Z, Y, X): pass both "
@@ -51,9 +51,9 @@ def load_stack(path: str | Path, channel: int | None = None,
         arr = arr[:, channel]
         arr = arr.max(axis=1) if z_project == "max" else arr.mean(axis=1)
         return _check_3d(arr, path, orig_shape)
-    # The file usually says what its axes ARE - tifffile exposes series[0].axes as
-    # e.g. 'ZYX' or 'TYX'. A z-stack has the same 3-D shape as a time series and was
-    # silently "tracked", producing tracks of nothing. Trust the metadata when present.
+    # The file usually records its axes: tifffile exposes series[0].axes as e.g.
+    # 'ZYX' or 'TYX'. A z-stack has the same 3-D shape as a time series and would
+    # otherwise be tracked, producing tracks of nothing. Use the metadata when present.
     if arr.ndim == 3 and axes and len(axes) == 3 and axes[0] not in ("T", "I", "Q"):
         raise ValueError(
             f"{path.name} has axes {axes!r}: the first axis is {axes[0]!r}, not time. "
@@ -96,10 +96,8 @@ def _check_3d(arr, path, orig_shape, axes=None):
 def _load_nd2(path: Path, channel: int | None = None) -> np.ndarray:
     """Read an ND2, preserving whatever axes it has for the caller to reduce.
 
-    The aicsimageio fallback previously requested "TYX" unconditionally, which silently
-    ignored `channel` and returned channel 0 - so the same file gave different answers
-    depending on which reader happened to be installed. It now asks for the channel
-    axis too and lets load_stack apply the caller's choice.
+    Both readers honour `channel`, so the same file gives the same result whichever
+    reader is installed.
     """
     try:
         import nd2
@@ -125,8 +123,8 @@ def _load_nd2(path: Path, channel: int | None = None) -> np.ndarray:
 def frame_interval_from_nd2(path: str | Path) -> float | None:
     """Median frame interval in seconds, if the file records timestamps.
 
-    Worth calling once on a new dataset: dt_seconds set wrongly rescales every rate in
-    the output without changing anything visible in the images.
+    Call it once on a new dataset: a wrong dt_seconds rescales every rate in the
+    output and nothing in the images shows it.
     """
     try:
         import nd2
@@ -147,10 +145,10 @@ def read_sample_sheet(path: str | Path) -> dict:
     """{file name: {column: value}} from a CSV with a `file` column.
 
     The sheet is how metadata (batch, genotype, ...) reaches the output: the user
-    supplies the mapping from file to metadata, and the package never guesses it from
-    a filename convention that is only true in one lab. Files are matched on their
-    base name, so the sheet can list bare names or full paths. Empty cells are left
-    out rather than stamped as NaN.
+    supplies the mapping from file to metadata, and nothing is parsed from filenames,
+    since naming conventions differ between labs. Files are matched on their base
+    name, so the sheet can list bare names or full paths. Empty cells are left out
+    rather than stamped as NaN.
     """
     sh = pd.read_csv(path)
     if "file" not in sh.columns:

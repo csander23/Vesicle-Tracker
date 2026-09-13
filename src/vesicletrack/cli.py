@@ -22,11 +22,11 @@ def main(argv=None) -> int:
     ap.add_argument("--dt", type=float, default=None, help="frame interval, seconds")
     ap.add_argument("--um-per-px", type=float, default=None)
     ap.add_argument("--mask", default=None,
-                    help="where to DETECT, applied to every movie: a binary image "
+                    help="where to detect, applied to every movie: a binary image "
                          "(.tif/.png/.npy) or ImageJ .roi/.zip. Use it to restrict "
                          "the analysis to one traced cell.")
     ap.add_argument("--rois", default=None,
-                    help="regions to LABEL, applied to every movie: ImageJ .roi/.zip, "
+                    help="regions to label, applied to every movie: ImageJ .roi/.zip, "
                          "a mask or label image, or .npy. Vesicles outside every "
                          "region are KEPT and labelled 'outside', not discarded.")
     ap.add_argument("--channel", type=int, default=None,
@@ -66,8 +66,8 @@ def main(argv=None) -> int:
         cfg = Config.load(a.config, **over)
         sheet = read_sample_sheet(a.sheet) if a.sheet else None
     except (ValueError, OSError, yaml.YAMLError) as e:
-        # A bad parameter is user error, not a bug: say what is wrong and stop,
-        # rather than printing a traceback the user has to read backwards.
+        # A bad parameter is user error: say what is wrong and stop, rather than
+        # printing a traceback.
         print(f"vesicletrack: configuration error: {e}", file=sys.stderr)
         return 2
 
@@ -81,8 +81,8 @@ def main(argv=None) -> int:
             files.append(pat)
         else:
             missing.append(pat)
-    # A mistyped path must not be silently dropped: reporting success on a subset of
-    # what was asked for is how a batch quietly analyses the wrong set of movies.
+    # A mistyped path is reported rather than dropped; otherwise a batch could report
+    # success on a subset of the movies that were asked for.
     if missing:
         print("vesicletrack: no such file(s): " + ", ".join(missing), file=sys.stderr)
         if not files:

@@ -1,11 +1,11 @@
-"""Documentation cannot silently drift from the code.
+"""Keep the documentation consistent with the code.
 
-Every parameter the code defines must appear in the shipped config AND in the
+Every parameter the code defines must appear in the shipped config and in the
 parameter reference, with the same default. Adding a field without documenting it
-fails here, which is the only reliable way to keep a reference honest over time.
+fails here.
 
-The section list comes from config.SECTIONS, not from a copy here: a copy once
-omitted `size` and `filters`, and their parameters went unchecked.
+The section list comes from config.SECTIONS rather than a copy, so a new section is
+checked as soon as it is registered.
 """
 import dataclasses
 
@@ -56,7 +56,7 @@ def test_every_parameter_is_documented():
 
 
 def test_defaults_agree_between_code_and_shipped_config():
-    """The YAML must not quietly ship different values than the dataclass defaults."""
+    """The YAML ships the same values as the dataclass defaults."""
     raw = yaml.safe_load(YAML.read_text())
     code = vcfg.Config().to_dict()
     diffs = []

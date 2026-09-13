@@ -1,4 +1,4 @@
-"""Edge cases, alternative input shapes, and the ways a user will actually break this.
+"""Edge cases, alternative input shapes, and likely misuse.
 
 Grouped by what is being defended:
   inputs      shapes and file types the loader must accept or clearly refuse
@@ -32,7 +32,7 @@ def test_npy_input(movie, tmp_path):
 
 
 def test_channel_axis_is_selectable(movie, tmp_path):
-    """A (T, C, Y, X) stack: the caller says which channel; we never guess."""
+    """A (T, C, Y, X) stack: the caller picks the channel."""
     s = tifffile.imread(movie)[:120]
     both = np.stack([s, np.zeros_like(s)], axis=1)          # channel 1 is empty
     p = tmp_path / "tc.tif"
@@ -98,13 +98,10 @@ def test_pure_noise_makes_no_movers(tmp_path):
 
 
 def test_directed_is_nan_not_zero_when_unmeasurable(movie):
-    """A track spanning under two tau-windows CANNOT have a directed value.
+    """A track spanning under two tau-windows has no directed value: NaN, not 0.0.
 
-    It must come back NaN, never 0.0. Returning 0.0 is indistinguishable from a vesicle
-    that genuinely did not move: a 60-frame track travelling 20 px in a straight line
-    reported directed=0.00 while net said 20.00, and because net_coarse was 0 too the
-    ordering check passed. This test previously asserted notna().all() and passed
-    BECAUSE of that bug.
+    0.0 would be indistinguishable from a vesicle that did not move, and because
+    net_coarse would be 0 as well, the ordering check would still pass.
     """
     r = analyse(movie, base_cfg(**{"link.min_length_frames": 5,
                                    "metrics.tau_directed_frames": 40,
@@ -122,7 +119,7 @@ def test_directed_is_nan_not_zero_when_unmeasurable(movie):
 
 
 def test_straight_mover_shorter_than_tau_is_not_reported_as_zero():
-    """The concrete case that exposed the bug, asserted directly on the metric."""
+    """A straight 20 px run shorter than tau: net is large, directed is NaN."""
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 90,
                       "filters.min_observed_frames": 180})
@@ -195,7 +192,7 @@ def test_drift_can_be_disabled(movie):
 
 
 def test_uncorrected_drift_inflates_movement(movie):
-    """The reason drift correction is on by default, stated as a test."""
+    """Without drift correction, stationary vesicles report more net displacement."""
     on = analyse(movie, base_cfg(), verbose=False)
     off = analyse(movie, base_cfg(**{"drift.enabled": False}), verbose=False)
     conf_on = on.vesicles.query("klass == 'confined'").net.median()
@@ -251,11 +248,7 @@ def test_seed_changes_only_the_null(movie):
 
 # --------------------------------------------------------------- json config
 def test_json_config_loads_identically(tmp_path):
-    """JSON is a subset of YAML, so both are accepted with no special handling.
-
-    Only the YAML is shipped - it is the single source of truth, and it carries the
-    comments. JSON round-trips through save(), it is not maintained in parallel.
-    """
+    """JSON is a subset of YAML, so both load identically; only the YAML is shipped."""
     y = Config.load(ROOT / "config" / "default.yaml")
     p = tmp_path / "exported.json"
     y.save(p)
@@ -263,8 +256,7 @@ def test_json_config_loads_identically(tmp_path):
 
 
 def test_save_format_follows_extension(tmp_path):
-    """A .json file must contain JSON. Writing YAML under a .json name is a lie the
-    next program to read it will not survive."""
+    """A .json file must contain JSON and a .yaml file YAML."""
     import json as _json
     c = Config.load(ROOT / "config" / "default.yaml", **{"dt_seconds": 0.02})
     pj, py = tmp_path / "c.json", tmp_path / "c.yaml"
@@ -302,14 +294,9 @@ def test_cli_accepts_json_config(tmp_path, movie):
     assert (tmp_path / "o" / "batch_summary.csv").exists()
 
 
-# ------------------------------------------------- regressions from the audit
+# ------------------------------------------------------------- regressions
 def test_directed_does_not_depend_on_when_the_track_started(movie):
-    """Absolute window grid: the same trajectory must score the same whenever it began.
-
-    Binning relative to each track's own first frame made `directed` depend on the
-    arbitrary phase against the window grid - the same trajectory gave 0.000 at one
-    length and 4.550 one frame later.
-    """
+    """Absolute window grid: the same trajectory scores the same whenever it began."""
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
                       "filters.min_observed_frames": 80})
@@ -338,7 +325,7 @@ def test_sparse_windows_do_not_inflate_directed():
 
 
 def test_degenerate_null_reports_infinite_z_not_zero():
-    """A null with no spread is MAXIMUM evidence, not none."""
+    """A null with no spread gives z = +inf, not 0."""
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 40,
                       "filters.min_observed_frames": 80})
@@ -350,7 +337,7 @@ def test_degenerate_null_reports_infinite_z_not_zero():
 
 
 def test_nonfinite_coordinate_is_invalid_not_confined():
-    """A NaN must not yield a confident biological label."""
+    """A NaN coordinate gives klass invalid, not confined."""
     from vesicletrack import metrics as M
     cfg = base_cfg()
     x = np.linspace(0, 10, 200); x[57] = np.nan
@@ -361,7 +348,7 @@ def test_nonfinite_coordinate_is_invalid_not_confined():
 
 
 def test_pvalue_does_not_depend_on_other_tracks_in_the_table():
-    """Per-track RNG: a vesicle's class must not change because a neighbour exists."""
+    """Per-track RNG: a vesicle's p-value does not change when another track is added."""
     from vesicletrack import metrics as M
     cfg = base_cfg()
     solo = pd.DataFrame({"particle": 7, "frame": np.arange(200),
@@ -443,17 +430,15 @@ def test_cli_end_to_end_with_sheet_and_aggregation(tmp_path, movie):
 
 
 def test_directed_requirement_is_on_span_not_observed_frames():
-    """The gate that nearly made the defaults useless.
+    """The requirement for directed is on span, not on observed frames.
 
     Real vesicles are only ~40% observed, so one spanning 400 frames holds ~163
-    detections. Gating `directed` on 2*tau OBSERVED frames therefore discarded the
-    genuine vesicles while appearing to protect the metric. The requirement is on SPAN.
+    detections; a gate of 2*tau observed frames would reject it.
     """
     from vesicletrack import metrics as M
     cfg = base_cfg(**{"metrics.tau_directed_frames": 90})
     rng = np.random.default_rng(0)
-    # the real case: spans 400 frames, 42% observed -> 168 detections, which is BELOW
-    # the 2*tau = 180 observed-frame gate that used to reject it.
+    # spans 400 frames, 42% observed -> 168 detections, below 2*tau = 180
     f = np.sort(rng.choice(400, 168, replace=False))
     m = M.metrics_for_track(np.linspace(0, 8, 168), np.zeros(168), f, cfg,
                             np.random.default_rng(0))
@@ -464,7 +449,7 @@ def test_directed_requirement_is_on_span_not_observed_frames():
 
 
 def test_occupancy_floor_keeps_realistically_sparse_windows():
-    """A floor of tau/2 sat above what a 42%-observed vesicle puts in a window."""
+    """A floor of tau/2 is above what a 42%-observed vesicle puts in a window."""
     from vesicletrack import metrics as M
     rng = np.random.default_rng(1)
     f = np.sort(rng.choice(400, 168, replace=False))          # 42% observed
@@ -543,10 +528,10 @@ def _runs_reference(steps, max_turn_deg, min_disp, min_steps):
 
 
 def test_batched_runs_match_the_scalar_reference_exactly():
-    """runs() on a (P, n, 2) batch must equal the per-track loop, bit for bit.
+    """runs() on a (P, n, 2) batch gives the same numbers as the per-track loop.
 
-    The null is scored as one batch; the observation as one track. If the two paths
-    ever disagreed the p-value would compare unlike quantities.
+    The null is scored as a batch and the observation as one track, so the two paths
+    have to agree exactly.
     """
     from vesicletrack import metrics as M
     rng = np.random.default_rng(11)
@@ -561,7 +546,7 @@ def test_batched_runs_match_the_scalar_reference_exactly():
 
 
 def test_null_uses_the_same_random_stream_as_before():
-    """One (P, n) draw must equal P successive draws of n, or seeds stop reproducing."""
+    """One (P, n) draw equals P successive draws of n, so seeded results are stable."""
     r1 = np.random.default_rng([0, 5])
     a = np.array([r1.uniform(0, 2 * np.pi, 7) for _ in range(4)])
     r2 = np.random.default_rng([0, 5])
@@ -569,7 +554,7 @@ def test_null_uses_the_same_random_stream_as_before():
 
 
 def test_any_metadata_column_reaches_every_level(movie, tmp_path):
-    """Metadata names are the user's; nothing in the package may hard-code them."""
+    """Metadata columns with any name reach the per-video, per-group and long tables."""
     from vesicletrack import aggregate
     a = analyse(movie, base_cfg(), name="c1", verbose=False, mouse="m1", dish=3)
     b = analyse(movie, base_cfg(), name="c2", verbose=False, mouse="m2", dish=3)
@@ -586,7 +571,7 @@ def test_any_metadata_column_reaches_every_level(movie, tmp_path):
 
 
 def test_per_video_counts_the_unfiltered_population(movie):
-    """n_pass / n_fail describe ALL vesicles, not the already-filtered subset."""
+    """n_pass and n_fail count all vesicles, not the filtered subset."""
     from vesicletrack import aggregate
     r = analyse(movie, base_cfg(**{"filters.min_observed_frames": 10_000}),
                 verbose=False)

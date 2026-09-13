@@ -1,7 +1,7 @@
-"""Smoke tests against the synthetic movie, where the answer is known.
+"""Smoke tests on the synthetic movie, where the ground truth is known.
 
-These are the checks worth running after any change: they assert the invariant that
-the directed metric rests on, and that the six planted movers are still recovered.
+Run these after any change. They check the ordering invariant the directed metric
+depends on, and that the six planted movers are recovered.
 
     pytest -q
 """
@@ -27,19 +27,25 @@ def test_recovers_the_planted_movers(result):
 
 
 def test_ordering_invariant_holds(result):
-    """gross >= directed >= net_coarse, for every vesicle. Geometry, not tuning."""
+    """gross >= directed >= net_coarse for every vesicle.
+
+    This follows from the geometry of the metrics and does not depend on parameters.
+    """
     assert len(check_ordering(result.vesicles)) == 0
 
 
 def test_movers_separate_from_confined(result):
-    """runs_p tests runs_total, NOT the `directed` column it used to sit beside."""
+    """runs_p is the permutation p-value of runs_total, not of the `directed` column."""
     v = result.vesicles
     assert v[v.klass == "mover"].runs_p.max() < 0.05
     assert v[v.klass == "confined"].runs_p.median() > 0.5
 
 
 def test_gross_is_noise_dominated(result):
-    """The reason the directed metric exists: gross cannot tell the classes apart."""
+    """gross does not separate movers from confined vesicles.
+
+    This is why the directed metric exists.
+    """
     g = result.vesicles.groupby("klass").gross.median()
     assert abs(g["mover"] - g["confined"]) / g["confined"] < 0.3
 

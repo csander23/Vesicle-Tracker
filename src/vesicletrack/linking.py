@@ -23,9 +23,9 @@ def link(spots: pd.DataFrame, cfg) -> pd.DataFrame:
         return pd.DataFrame(columns=["particle", "frame", "x", "y"])
     tr = tp.link(spots, search_range=cfg.link.search_range_px,
                  memory=cfg.link.memory_frames)
-    # MERGE FIRST, then filter. Filtering first deletes exactly the short fragments
-    # that merging exists to rejoin: a vesicle broken into three 20-frame pieces was
-    # discarded entirely at a 40-frame floor, when the merged track would have been 60.
+    # Merge first, then filter. Filtering first would delete the short fragments that
+    # merging exists to rejoin: a vesicle broken into three 20-frame pieces would be
+    # discarded at a 40-frame floor, when the merged track would have been 60.
     tr = merge_colocated(tr, cfg.link.merge_radius_px,
                          max_gap=cfg.link.merge_max_gap_frames,
                          overlap_tol=cfg.link.merge_overlap_tolerance)
@@ -45,14 +45,14 @@ def merge_colocated(tr: pd.DataFrame, radius: float, max_gap: int = 15,
                     overlap_tol: int = 2) -> pd.DataFrame:
     """Rejoin fragments of one vesicle that the linker split at a long dropout.
 
-    Fragment B is merged into fragment A only if ALL of:
+    Fragment B is merged into fragment A only if all of:
       1. they are essentially disjoint in time - B starts no more than `overlap_tol`
          frames before A ends. Two fragments that coexist are two vesicles.
       2. the dropout is short: B starts within `max_gap` frames of A ending. This is
          the "look back" window, and it is what stops a vesicle being joined to an
          unrelated one that arrived at the same spot much later.
-      3. they are close AT THE JUNCTION: A's last position is within `radius` of B's
-         first. Mean position is the wrong test - a vesicle that moved has a mean
+      3. they are close at the junction: A's last position is within `radius` of B's
+         first. Mean position is the wrong test, since a vesicle that moved has a mean
          nowhere near either endpoint.
 
     Union-find, so a chain of three fragments becomes one vesicle rather than two pairs.

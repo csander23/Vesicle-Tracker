@@ -1,4 +1,4 @@
-"""vesicletrack - parameterised single-vesicle detection, tracking and movement scoring.
+"""vesicletrack: parameterised single-vesicle detection, tracking and movement scoring.
 
     from vesicletrack import Config, analyse
     cfg = Config.load("config/default.yaml", dt_seconds=0.0446, um_per_px=0.107)

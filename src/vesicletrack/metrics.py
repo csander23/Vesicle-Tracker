@@ -1,53 +1,49 @@
 r"""Per-vesicle movement metrics: net, gross, and directed.
 
-The two obvious readouts both fail on high-frame-rate data, in opposite directions.
+The two simple readouts both fail on high-frame-rate data.
 
-  GROSS  = sum of per-frame step lengths. A stationary vesicle still accumulates
-           localisation noise every frame, so over a thousand frames it racks up
+  gross  = sum of per-frame step lengths. A stationary vesicle still accumulates
+           localisation noise every frame, so over a thousand frames it reports
            hundreds of pixels of "movement". Gross path is dominated by noise.
 
-  NET    = |end - start|. Blind to a vesicle that runs out and comes back, or makes
-           several directed runs in different directions. A genuinely motile but
-           complex trajectory scores near zero.
+  net    = |end - start|. A vesicle that runs out and comes back, or makes several
+           runs in different directions, scores near zero however far it travelled.
 
-DIRECTED sits between them. Positions are averaged in windows of tau frames before
-the path is measured:
+The directed metric averages positions in windows of tau frames before measuring the
+path:
 
     c_k = mean of r_i over window k,     L(tau) = sum_k |c_{k+1} - c_k|
 
 Uncorrelated localisation error averages down as 1/sqrt(tau) while real transport is
-untouched, and reversals faster than tau cancel inside a window. Because coarsening
-can only shorten a path (triangle inequality), the ordering
+unchanged, and reversals faster than tau cancel inside a window. Coarsening can only
+shorten a path (triangle inequality), so
 
-    gross = L(dt)  >=  L(tau)  >=  L(T) = net
+    gross = L(dt)  >=  L(tau)  >=  L(T) = net_coarse
 
-holds for every vesicle at every tau - a useful invariant to assert on new data. If it
-fails, something upstream is wrong.
+holds for every vesicle at every tau. check_ordering() tests it; if it fails,
+something upstream is wrong.
 
-TWO FAMILIES OF COLUMNS, AT TWO TIMESCALES. Keep them apart:
+Two families of columns, at two timescales:
 
-    directed        = L(tau_directed_frames), the path at the coarse timescale.
-                      Accompanied by directed_measurable and n_tau_windows.
+    directed        = L(tau_directed_frames), the path at the coarse timescale,
+                      with directed_measurable and n_tau_windows.
     runs_total      = the run-detection metric, computed on coarse steps at the
-                      SHORTER tau_frames. runs_p / runs_z / runs_excess / runs_null
-                      all belong to THIS quantity.
+                      shorter tau_frames. runs_p, runs_z, runs_excess and runs_null
+                      all describe this quantity.
 
-`runs_p` is NOT the p-value of `directed`. They are different metrics on different
-coarsenings, and the columns were originally named directed_p / directed_runs, sitting
-next to `directed` in the output - an arrangement that invited "directed displacement
-was significant (p < 0.05)" written about the wrong number. Both tau values are emitted
-as columns so which is which can always be recovered from the file alone.
+runs_p is the p-value of runs_total, not of directed. Both tau values are written as
+columns so the file records which window each metric used.
 
-`runs_total` splits the coarse steps into directionally persistent runs and sums those
-that clear a minimum, which credits a vesicle making three runs in three directions and
-gives nothing to back-and-forth jiggle.
+runs_total splits the coarse steps into directionally persistent runs and sums those
+that clear a minimum length. A vesicle making three runs in three directions is
+credited for all three; back-and-forth jitter gets nothing.
 
-Significance comes from a PER-VESICLE null: each coarse step keeps its magnitude but is
-given a random heading, i.e. an isotropic walk with that vesicle's exact step-size
-distribution. Whatever directed distance that still accumulates is what run-detection
-finds by chance. Note the null randomises DIRECTION, not order - permuting order leaves
-a smooth run's step vectors all pointing the same way, so the null reproduces the
-observation and the clearest movers score p ~ 1.
+Significance comes from a per-vesicle null: each coarse step keeps its magnitude and
+is given a random heading, which gives an isotropic walk with that vesicle's own
+step-size distribution. The directed distance that still accumulates is what run
+detection finds by chance. The null randomises direction and leaves step order alone.
+Permuting order would leave a smooth run's step vectors all pointing the same way, so
+the null would reproduce the observation and the clearest movers would score p ~ 1.
 """
 from __future__ import annotations
 
@@ -58,34 +54,27 @@ import pandas as pd
 def coarse(x, y, f, tau: int, occupancy_frac: float):
     """Average positions within tau-frame windows. Returns (cx, cy, ct, n_per_window).
 
-    Two things here are deliberate and were not in the first version.
+    Windows are `f // tau`, an absolute grid shared by every vesicle in the movie,
+    rather than `(f - f[0]) // tau`. Binning relative to each track's own first frame
+    makes the result depend on where that track happens to start against the window
+    grid: the same simulated trajectory gave different directed values when started
+    at frame 0, 1, 2, 3 or 4.
 
-    ABSOLUTE WINDOW GRID. Windows are `f // tau`, not `(f - f[0]) // tau`. Binning
-    relative to each track's own first frame made the result depend on the arbitrary
-    phase of that track against the window grid: the same 400-frame simulated
-    trajectory gave different directed values when started at frame 0, 1, 2, 3 or 4.
-    An absolute grid is shared by every vesicle in the movie, so two identical
-    trajectories score identically no matter when they were first seen.
-
-    OCCUPANCY FLOOR. A window holding one observed frame contributes a raw position
+    Windows holding fewer than `round(tau * occupancy_frac)` observed frames (at
+    least 1) are dropped. A window with one observed frame contributes a raw position
     with full localisation noise, while a full window contributes a mean with noise
-    suppressed by 1/sqrt(tau) - precisely the asymmetry coarse-graining exists to
-    remove. Worse, it made the metric track detection dropout rather than motion: on
-    purely stationary simulated vesicles, `directed` rose from 0.117 to 0.164 as the
-    observed fraction fell from 1.00 to 0.42, with no change in the underlying motion.
-    Windows holding fewer than `round(tau * occupancy_frac)` observed frames (at least
-    1) are dropped, so every surviving centroid is averaged over a comparable number
-    of samples. `n_per_window` is returned so callers can see what was kept.
+    reduced by 1/sqrt(tau), so keeping sparse windows makes the metric follow
+    detection dropout rather than motion: on stationary simulated vesicles, directed
+    rose from 0.117 to 0.164 as the observed fraction fell from 1.00 to 0.42.
+    `n_per_window` is returned so callers can see what was kept.
 
-    `occupancy_frac` is `metrics.min_window_occupancy` and has no default here on
-    purpose: every caller - scoring, rendering, tests - must coarse-grain with the
-    same floor, or the drawn coarse path stops matching the measured one. The shipped
-    value is 0.25, NOT half. Half was measured to be too strict for real data: genuine
-    vesicles here are only about 42% observed, so a 90-frame window holds roughly 38
-    detections and a floor of 45 discarded windows belonging to perfectly good
-    vesicles - taking the fraction of tracks with a measurable `directed` from 18%
-    down to 8%. A quarter sits safely below the real observation rate while still
-    excluding the one- and two-frame windows that carry full localisation noise.
+    `occupancy_frac` is `metrics.min_window_occupancy` and has no default here, so
+    that scoring, rendering and tests all coarse-grain with the same floor. The
+    shipped value is 0.25. A floor of 0.5 was too strict for real data: vesicles here
+    are only about 42% observed, so a 90-frame window holds roughly 38 detections,
+    and a floor of 45 dropped windows from good tracks and took the fraction of
+    tracks with a measurable directed value from 18% to 8%. 0.25 is below the real
+    observation rate but still excludes one- and two-frame windows.
     """
     f = np.asarray(f, dtype=np.int64)
     x = np.asarray(x, float)
@@ -106,15 +95,12 @@ def coarse(x, y, f, tau: int, occupancy_frac: float):
 def path_at_tau(x, y, f, tau: int, occupancy_frac: float) -> float:
     """L(tau): path length measured at timescale tau. The directed distance.
 
-    Returns NaN - not 0.0 - when the track spans fewer than two tau-windows.
-
-    That distinction is the whole point. A track shorter than tau yields a single
-    centroid, so no path can be formed. Returning 0.0 there is indistinguishable from
-    a vesicle that genuinely did not move, and it is silently wrong: a vesicle
-    travelling 20 px in a straight line over 60 frames reported directed = 0.00 at the
-    shipped tau of 90, while net said 20.00. Worse, net_coarse was 0.0 for the same
-    reason, so check_ordering saw 20 >= 0 >= 0 and passed. NaN makes the gap visible
-    and keeps it out of any median.
+    Returns NaN, not 0.0, when the track spans fewer than two tau-windows. A track
+    shorter than tau gives a single centroid, so no path can be formed. Returning 0.0
+    would be indistinguishable from a vesicle that did not move: a vesicle travelling
+    20 px in a straight line over 60 frames would report directed = 0.00 at tau = 90
+    while net says 20.00, and net_coarse would be 0.0 too, so check_ordering would
+    pass. NaN keeps such tracks out of every median and marks them as unmeasured.
     """
     cx, cy, _, _ = coarse(x, y, f, tau, occupancy_frac)
     return _path(cx, cy)
@@ -130,13 +116,13 @@ def runs(steps: np.ndarray, max_turn_deg: float, min_disp: float, min_steps: int
     A run continues while the next step turns less than max_turn from the run's current
     heading. Returns (total displacement, n runs kept, longest run, steps inside runs).
 
-    `steps` is (n, 2) for one track, or (P, n, 2) for P tracks with the same number of
-    steps - the permutation null is exactly that shape, so it is scored in one pass
-    down the step axis instead of P separate Python loops. With a batch input each
-    return value is an array of length P. The two forms give bit-identical answers:
-    the per-track arithmetic is the same additions in the same order.
+    `steps` is (n, 2) for one track, or (P, n, 2) for P tracks with the same number
+    of steps. The permutation null has that shape, so it is scored in one pass down
+    the step axis instead of P separate Python loops. With a batch input each return
+    value is an array of length P. The two forms give identical answers, since the
+    per-track arithmetic is the same additions in the same order.
 
-    min_steps >= 2 matters: allowing one-step runs makes the total converge on plain
+    min_steps must be >= 2. Allowing one-step runs makes the total converge on plain
     path length for real and random tracks alike, and the metric loses its contrast
     against the null.
     """
@@ -202,10 +188,10 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
     x, y = np.asarray(x, float), np.asarray(y, float)
     f = np.asarray(f, np.int64)
 
-    # A single non-finite coordinate used to propagate asymmetrically: gross/directed
-    # came back NaN but the run detector returned 0.0 and p = 1.0, so the vesicle was
-    # labelled `confined` - a positive claim about biology derived from corrupt data,
-    # invisible to check_ordering. Mark it invalid instead of guessing.
+    # A non-finite coordinate marks the track invalid rather than scoring it. Scored,
+    # it would give gross and directed NaN but runs_total 0.0 and p 1.0, so the
+    # vesicle would be labelled `confined` on the basis of a corrupt track, and
+    # check_ordering would not see it.
     finite = np.isfinite(x) & np.isfinite(y)
     if not finite.all():
         return dict(frame_start=int(f[0]), frame_end=int(f[-1]),
@@ -215,10 +201,10 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
                     directed_measurable=False)
     dur = float((f[-1] - f[0]) * cfg.dt_seconds) or cfg.dt_seconds
 
-    # LIFETIME. span and observed are different numbers whenever the linker bridged a
-    # dropout, and on real data they differ by more than half: median span 398 frames
-    # vs 167 observed. Reporting only one of them describes a vesicle as present in
-    # frames where nothing was detected, so both are carried through.
+    # Lifetime. Span and observed frames differ whenever the linker bridged a
+    # dropout, and on real data by a lot (median span 398 frames vs 167 observed).
+    # Both are reported, since span alone describes a vesicle as present in frames
+    # where nothing was detected.
     span = int(f[-1] - f[0] + 1)
     gaps = np.diff(f) - 1
     gaps = gaps[gaps > 0]
@@ -273,10 +259,10 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
             sd = null.std(ddof=1)
             out["runs_null"] = float(null.mean())
             out["runs_excess"] = float(total - null.mean())
-            # A null with NO spread is the case of MAXIMUM evidence, not of no
-            # evidence. Reporting z = 0.0 there (the value meaning "indistinguishable
-            # from the null") systematically discarded the cleanest movers: a steady
-            # drift scored runs_p = 0.005 and z = 0.0 simultaneously.
+            # A null with no spread means every permutation scored the same and the
+            # observation beat all of them, which is the strongest possible evidence.
+            # z = 0.0 there would read as no evidence (a steady drift gets
+            # runs_p = 0.005 and would get z = 0.0), so +inf is reported instead.
             if not np.isfinite(sd):
                 out["runs_z"] = float("nan")            # fewer than 2 permutations
             elif sd > 1e-9:
@@ -302,10 +288,10 @@ def metrics_for_track(x, y, f, cfg, rng, n_movie_frames: int | None = None) -> d
         out["max_excursion"] = float(np.sqrt(d2.max()))
         out["rg"], out["aniso"] = gyration(cx, cy)
 
-    # CENSORING. A vesicle already present in frame 0, or still present in the last
-    # frame, has a lifetime we did not observe the end of. Averaging those in with
-    # complete observations biases mean lifetime DOWNWARD, because the truncated value
-    # is always shorter than the truth. Flag them; do not silently pool them.
+    # Censoring. A vesicle present in frame 0 or in the last frame has a lifetime
+    # whose start or end was not observed. Pooling those with complete observations
+    # biases mean lifetime downward, because the truncated value is always shorter
+    # than the truth, so they are flagged.
     if n_movie_frames is not None:
         out["censored_start"] = bool(f[0] <= 0)
         out["censored_end"] = bool(f[-1] >= n_movie_frames - 1)
@@ -340,9 +326,8 @@ def score_tracks(tracks: pd.DataFrame, cfg,
                  n_movie_frames: int | None = None) -> pd.DataFrame:
     """One row per vesicle, with metrics, unit conversions and a class label.
 
-    EVERY tracked vesicle gets a row. Nothing is dropped here - short, gappy and
-    suspect tracks are all scored and labelled so they can be filtered downstream on
-    evidence rather than disappearing upstream on a threshold.
+    Every tracked vesicle gets a row. Short, gappy and suspect tracks are all scored
+    and labelled so they can be filtered downstream rather than dropped here.
     """
     rows = []
     dup = tracks.duplicated(subset=["particle", "frame"]).sum()
@@ -353,10 +338,9 @@ def score_tracks(tracks: pd.DataFrame, cfg,
             "indicate a merge that did not average coincident frames.")
     for p, d in tracks.groupby("particle", sort=True):
         d = d.sort_values("frame")
-        # Seed PER TRACK. A single shared generator made each vesicle's null - and so
-        # its p-value and its class - depend on how many vesicles happened to be
-        # scored before it, meaning a track could change class simply because another
-        # track was added to the movie.
+        # Seed per track. With one shared generator a vesicle's null, and so its
+        # p-value and class, would depend on how many vesicles were scored before it,
+        # so adding a track to the movie could change another track's class.
         rng = np.random.default_rng([cfg.metrics.random_seed, int(p)])
         rec = metrics_for_track(d.x.values, d.y.values, d.frame.values, cfg, rng,
                                 n_movie_frames=n_movie_frames)
@@ -364,14 +348,13 @@ def score_tracks(tracks: pd.DataFrame, cfg,
         rec["x0"], rec["y0"] = float(d.x.iloc[0]), float(d.y.iloc[0])
         rows.append(rec)
     if not rows:
-        # An empty frame WITH the schema. A bare DataFrame() has no columns, so
-        # check_ordering raised AttributeError on a movie with no vesicles, and
-        # pd.concat of per-movie tables silently produced all-NaN columns.
+        # An empty frame with the full schema. A bare DataFrame() has no columns, so
+        # check_ordering would fail on a movie with no vesicles and pd.concat of
+        # per-movie tables would produce all-NaN columns.
         return pd.DataFrame(columns=EMPTY_SCHEMA)
     df = pd.DataFrame(rows)
-    # Invalid tracks return a short record, so guarantee the full schema before
-    # anything downstream indexes into it. Missing entries become NaN, which is the
-    # honest value for a metric that could not be computed.
+    # Invalid tracks return a short record, so fill in the full schema before
+    # anything downstream indexes into it. Missing entries become NaN.
     for c in EMPTY_SCHEMA:
         if c not in df.columns:
             df[c] = np.nan
@@ -395,9 +378,10 @@ def score_tracks(tracks: pd.DataFrame, cfg,
 def classify(df: pd.DataFrame, cfg) -> pd.DataFrame:
     """Label each vesicle: excluded / mover / confined.
 
-    `excluded` is checked first and is a tracking-quality judgement, not biology: a
-    single large jump, or repeated large steps, is the signature of an identity swap
-    between two nearby vesicles. Leaving those in inflates the mover count.
+    `excluded` is checked first. It is a tracking-quality label rather than a
+    biological one: a single large jump, or repeated large steps, is the signature of
+    an identity swap between two nearby vesicles, and leaving those in inflates the
+    mover count.
     """
     c = cfg.classify
     df = df.copy()
@@ -424,9 +408,9 @@ def classify(df: pd.DataFrame, cfg) -> pd.DataFrame:
 def check_ordering(df: pd.DataFrame, tol: float = 1e-6) -> pd.DataFrame:
     """Rows violating gross >= directed >= net_coarse. Should be empty.
 
-    Compared against net_coarse, not net - see the module docstring. A non-empty result
-    means coarse-graining lengthened a path, which is geometrically impossible, so the
-    cause is upstream: duplicated frames, unsorted tracks, or NaNs.
+    Compared against net_coarse rather than net; see the module docstring. A non-empty
+    result means coarse-graining lengthened a path, which is geometrically impossible,
+    so the cause is upstream: duplicated frames, unsorted tracks, or NaNs.
     """
     if not len(df) or "gross" not in df.columns:
         return pd.DataFrame(columns=["particle", "gross", "directed",

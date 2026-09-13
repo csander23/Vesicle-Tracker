@@ -1,46 +1,47 @@
 # ============================================================================
 #  vesicletrack parameters
 #
-#  Every number the pipeline uses lives here. A run is fully described by this
-#  file plus the input path, which is what makes a result reproducible.
+#  Every number the pipeline uses is set in this file. A run is fully
+#  described by this file plus the input path, so results can be reproduced.
 #
 #  Defaults were validated on 60 s spinning-disk recordings of Rab5-RFP
 #  endosomes in glia at ~22 fps (0.0446 s/frame).
 #
-#  START HERE on a new dataset: set dt_seconds and um_per_px, then
+#  On a new dataset, set dt_seconds and um_per_px first, then
 #  detect.threshold_sigma and detect.psf_sigma_px. Everything else can usually
 #  stay. Full reference with units and tuning advice: docs/PARAMETERS.md
 # ============================================================================
 
 # ---- acquisition -----------------------------------------------------------
-# These two describe YOUR microscope and cannot be inferred from the images.
-# Get dt_seconds wrong and every rate below is wrong while nothing looks wrong.
-dt_seconds: 0.0446        # seconds between frames.  REQUIRED
+# These two describe the microscope and cannot be inferred from the images.
+# If dt_seconds is wrong, every rate below is wrong and the images give no
+# hint of it.
+dt_seconds: 0.0446        # seconds between frames. Required
 um_per_px: null           # micron per pixel; null = report everything in pixels
 output_dir: output        # where results are written (per-movie subfolder)
 
 # ---- stage drift -----------------------------------------------------------
-# Drift moves every vesicle together, so uncorrected it reads as directed
-# transport in ALL of them at once. Leave enabled unless you know the stage was
-# fixed. The measured span is reported in summary.json.
+# Drift moves every vesicle together, so if uncorrected it reads as directed
+# transport in all of them at once. Leave enabled unless the stage is known to
+# have been fixed. The measured span is reported in summary.json.
 drift:
   enabled: true
-  smoothing_sigma: 6.0    # px blur before registering; large = lock onto
-                          #   static cell structure, not the moving vesicles
+  smoothing_sigma: 6.0    # px blur before registering; large values lock onto
+                          #   static cell structure rather than moving vesicles
   reference_frames: 20    # frames median-projected to build the reference
   median_filter: 5        # temporal smoothing of the shift series; stops one
                           #   bad frame injecting a jump. 0/1 = off
   min_span_px: 0.5        # if total drift is below this, skip applying it
 
 # ---- spot detection --------------------------------------------------------
-# Per-frame. Tune threshold_sigma FIRST and check the middle panel of
-# three_panel.png: are the vesicles found, and is anything invented?
+# Per-frame. Tune threshold_sigma first and check the middle panel of
+# three_panel.png: are the vesicles found, and are any spurious spots detected?
 detect:
-  method: dao             # "dao" (photutils DAOStarFinder) - the only backend
+  method: dao             # "dao" (photutils DAOStarFinder), the only backend
   psf_sigma_px: 1.3       # approximate spot sigma. Measure it once from a
-                          #   bright isolated vesicle; wrong = poor centroids
+                          #   bright isolated vesicle; if wrong, centroids are poor
   threshold_sigma: 3.0    # detection threshold in background sigma.
-                          #   LOWER = more spots, more noise. HIGHER = misses
+                          #   Lower = more spots, more noise. Higher = misses
                           #   dim vesicles. The main sensitivity knob
   roundness: 0.7          # |roundness| cut; rejects streaks, edges, cosmic
                           #   rays. Raise toward 1.0 to accept odd shapes
@@ -53,19 +54,21 @@ detect:
 # ---- linking ---------------------------------------------------------------
 # Detections -> tracks, then clean up.
 link:
-  search_range_px: 3.0    # max frame-to-frame displacement. TOO LARGE is the
-                          #   dangerous direction: it invites identity swaps
-                          #   between neighbouring vesicles
+  search_range_px: 3.0    # max frame-to-frame displacement. Too large is the
+                          #   risky direction: it allows identity swaps between
+                          #   neighbouring vesicles
   memory_frames: 15       # frames a vesicle may vanish (blink, defocus) and
                           #   still be relinked to the same identity
-  min_length_frames: 3    # HARD floor only - below this no metric exists at all
+  min_length_frames: 3    # hard floor only; below this no metric exists at all
                           #   (a 2-frame track has a single step). The scientific
-                          #   length cut is filters.min_observed_frames, which LABELS
-                          #   instead of deleting so nothing vanishes upstream
-  # Rejoining a vesicle the linker LOST ("looking back"). A fragment is rejoined only
-  # if it is temporally disjoint, starts within merge_max_gap_frames of the previous
-  # one ending, and is within merge_radius_px AT THE JUNCTION. Merging on mean
-  # position alone fuses different vesicles that used the same spot at different times.
+                          #   length cut is filters.min_observed_frames, which
+                          #   labels instead of deleting, so nothing is removed
+                          #   upstream
+  # Rejoining a vesicle the linker lost. A fragment is rejoined only if it is
+  # temporally disjoint, starts within merge_max_gap_frames of the previous one
+  # ending, and is within merge_radius_px at the junction. Merging on mean
+  # position alone fuses different vesicles that used the same spot at different
+  # times.
   merge_radius_px: 4.0    # end-to-start distance allowed when rejoining. 0 = off
   merge_max_gap_frames: 15    # how far back to look for a lost vesicle, in frames
   merge_overlap_tolerance: 2  # frames of overlap still treated as one vesicle;
@@ -73,23 +76,23 @@ link:
 
 # ---- vesicle size ----------------------------------------------------------
 # Intensity-weighted second moment of a window around each spot.
-# READ src/vesicletrack/size.py BEFORE USING: a vesicle is below the diffraction
+# See src/vesicletrack/size.py before using: a vesicle is below the diffraction
 # limit, so sigma_px is mostly the PSF. Raw sigma_px is the right column for
 # comparing conditions imaged identically; deconvolved size carries a noise floor
 # of ~0.4 px measured on point sources that have no size at all.
 size:
   enabled: true
   window_px: 4            # half-width; 4 -> a 9x9 window per spot
-  psf_sigma_px: null      # null = calibrate the PSF from THIS movie (recommended:
+  psf_sigma_px: null      # null = calibrate the PSF from this movie (recommended:
                           #   absorbs the estimator's upward noise bias)
   psf_from_percentile: 5.0    # which percentile of measured widths is "a point source"
-  max_frames: 200         # frames sampled per track; more buys no precision
+  max_frames: 200         # frames sampled per track; more adds no precision
 
 # ---- movement metrics ------------------------------------------------------
 # net = |end-start|, gross = summed steps, directed = path at timescale tau.
 # See README for why gross and net alone are not enough.
 metrics:
-  tau_frames: 22          # coarse-graining window for RUN DETECTION (~1 s).
+  tau_frames: 22          # coarse-graining window for run detection (~1 s).
                           #   Larger = more noise averaged away
   tau_directed_frames: 90 # timescale defining "consistent direction" (~4 s).
                           #   This sets the `directed` column. Larger = only
@@ -97,29 +100,29 @@ metrics:
                           #   Must be >= tau_frames
   max_turn_deg: 60.0      # a step turning more than this ends a run
   min_run_disp_px: 1.0    # runs shorter than this are not counted as transport
-  min_run_steps: 2        # a run must persist >= 2 coarse steps. MUST be >= 2:
+  min_run_steps: 2        # a run must persist >= 2 coarse steps. Must be >= 2:
                           #   1 collapses `directed` onto plain path length
   min_window_occupancy: 0.25  # fraction of tau a window must actually contain to
                           #   be used. Real vesicles here are only ~42% observed,
-                          #   so a floor of 0.5 discarded windows from perfectly
-                          #   good tracks and took the measurable fraction from
-                          #   18% to 8%. 0.25 sits below the real rate while still
-                          #   excluding one-frame windows that carry full noise
+                          #   so a floor of 0.5 discards windows from good tracks
+                          #   and drops the measurable fraction from 18% to 8%.
+                          #   0.25 is below the real rate but still excludes
+                          #   one-frame windows, which are all noise
   n_permutations: 200     # per-vesicle null for the p-value. p floors at
                           #   1/(n+1), so 200 -> smallest possible p is 0.005.
                           #   0 disables the p-value entirely
-  random_seed: 0          # only affects the null, never the measurement
+  random_seed: 0          # only affects the null, not the measurement
 
 # ---- classification --------------------------------------------------------
 # Turns metrics into labels: mover / confined / excluded.
 classify:
-  use_permutation: true   # true  = a mover BEATS ITS OWN NULL (recommended)
+  use_permutation: true   # true  = a mover must beat its own null (recommended)
                           # false = fixed rate threshold instead
   p_threshold: 0.05       # used when use_permutation is true
   mover_rate_px_per_s: 0.15   # used only when use_permutation is false
   mover_min_net_px: 4.0   # guard against short-lived artifacts scoring as
                           #   movers on a tiny but significant displacement
-  # `excluded` is a TRACKING-QUALITY judgement, not biology: these are the
+  # `excluded` is a tracking-quality label, not a biological one: these are the
   # signatures of an identity swap between two nearby vesicles. Leaving them
   # in inflates the mover count.
   exclude_max_step_px: 5.0    # one jump this large = suspected mislink
@@ -127,52 +130,53 @@ classify:
   big_step_px: 3.0            # what counts as "big" for the rule above
 
 # ---- filters ---------------------------------------------------------------
-# These LABEL vesicles, they never delete them. Every vesicle is written to
-# vesicles_all.csv with passes_filter + filter_reason; the passing subset is also
-# written to vesicles_filtered.csv. Any filter can be re-derived later from the
-# `all` file, so a threshold is a reversible choice rather than lost data.
+# Filters add a label. No vesicle is removed from the output. Every vesicle is
+# written to vesicles_all.csv with passes_filter + filter_reason; the passing
+# subset is also written to vesicles_filtered.csv. Any filter can be re-derived
+# later from the `all` file, so a threshold can be changed afterwards without
+# losing data.
 # null = rule off.
 filters:
-  min_observed_frames: 40     # frames actually DETECTED. A TRACKING-QUALITY cut.
-                              #   This is NOT the requirement for `directed` - that
-                              #   one is on SPAN, below. Gating it on observed frames
-                              #   rejected the genuine vesicles: they are ~40%
-                              #   observed, so a 400-frame vesicle holds only ~163
-                              #   detections and a 180 gate threw it away.
+  min_observed_frames: 40     # frames actually detected. A tracking-quality cut.
+                              #   This is not the requirement for `directed`; that
+                              #   one is on span, below. Gating on observed frames
+                              #   rejects genuine vesicles: they are ~40% observed,
+                              #   so a 400-frame vesicle holds only ~163 detections
+                              #   and a gate of 180 would drop it.
   min_span_frames: null       # first-to-last extent; null = rule off
   require_directed_measurable: true   # keep only vesicles for which `directed` exists.
-                              #   This is the EXACT condition, not a proxy: whether it
+                              #   This is the exact condition: whether `directed`
                               #   exists depends on how many observed frames land in
-                              #   each tau-window, which no threshold on span or on
-                              #   total observed frames can express. With this on,
-                              #   "filtered" means usable by construction
+                              #   each tau-window, and no threshold on span or on
+                              #   total observed frames can express that. With this
+                              #   on, every filtered vesicle has a usable `directed`
   max_observed_frames: null
-  min_lifetime_s: null        # on SPAN: first to last sighting
-  max_lifetime_s: null        # CAUTION: an upper lifetime bound preferentially keeps
-                              #   tracks the tracker LOST early - it selects for
-                              #   tracking failure, not for short-lived biology
+  min_lifetime_s: null        # on span: first to last sighting
+  max_lifetime_s: null        # Warning: an upper lifetime bound preferentially
+                              #   keeps tracks the tracker lost early, so it selects
+                              #   for tracking failure rather than short-lived biology
   min_frac_observed: 0.0      # reject tracks that are mostly gap (0.5 = half seen)
   max_longest_gap: null       # frames
   exclude_censored: false     # tracks touching the first or last frame have an
                               #   unobserved true lifetime (right-censored)
-  exclude_classes: [excluded] # `excluded` = suspected identity swap, not biology
+  exclude_classes: [excluded] # `excluded` = suspected identity swap (tracking quality)
   rois: []                    # e.g. [soma] to keep one region; empty = keep all
   min_sigma_px: null
   max_sigma_px: null
 
 # ---- output ----------------------------------------------------------------
 render:
-  three_panel: true       # RAW | ALL VESICLES | CLASSIFIED - the QC image
+  three_panel: true       # raw | all vesicles | classified; the QC image
   per_vesicle_images: true    # one per vesicle: trajectory + all 3 distances
-  per_vesicle_videos: false   # one FILE per vesicle; off by default
+  per_vesicle_videos: false   # one file per vesicle; off by default
   overview_video: false       # whole field, tracks coloured by class
   max_vesicle_outputs: 25 # cap on per-vesicle files (movers first), so a dense
                           #   field cannot emit thousands. Recorded in summary
-  trail_frames: 40        # trail length in ACQUISITION frames (not sampled
+  trail_frames: 40        # trail length in acquisition frames (not sampled
                           #   frames), identical in both video kinds. 0 = no trail
   frame_step: 4           # temporal downsample for videos (4 = every 4th frame)
   fps: 20                 # playback rate of written videos
   dpi: 150                # raster resolution of PNG figures
-  percentiles: [1.0, 99.7]    # display stretch; affects LOOKS only, never data
+  percentiles: [1.0, 99.7]    # display stretch; affects display only, not data
   ffmpeg: ffmpeg          # path if not found automatically; videos are skipped
                           #   with a warning if missing, images are unaffected

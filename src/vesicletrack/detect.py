@@ -29,8 +29,8 @@ from scipy.ndimage import gaussian_filter
 def _uses_roundness_range() -> bool:
     """photutils >= 3.0 replaced roundlo/roundhi with roundness_range=(lo, hi).
 
-    Detected from the signature rather than from a version string, so this keeps
-    working whenever the change actually lands rather than when we guess it did.
+    Detected from the signature rather than a version string, so it works whichever
+    release makes the change.
     """
     return "roundness_range" in inspect.signature(DAOStarFinder).parameters
 
@@ -44,8 +44,8 @@ def _col(tbl, *names):
     """First column name that exists.
 
     photutils 3.0 renamed xcentroid -> x_centroid and will drop the old names in 4.0.
-    Accepting either keeps this working across that break instead of emitting a
-    deprecation warning per detection now and failing outright later.
+    Accepting either keeps this working across that change without a deprecation
+    warning per detection.
     """
     for n in names:
         if n in tbl.colnames:
@@ -74,11 +74,10 @@ def detect_frame(img: np.ndarray, cfg) -> pd.DataFrame:
     a = img.astype(np.float32)
     if d.background_sigma and d.background_sigma > 0:
         a = a - gaussian_filter(a, d.background_sigma)
-    # Estimate the noise on real pixels only. On a movie that has been ROI-masked to
-    # zero outside the cell, the zeros dominate the sigma-clipped statistics, std
-    # collapses toward 0 and the threshold with it - or the median shifts and most
-    # detections vanish. Either way the count depends on how much of the frame was
-    # blanked, which is not a property of the sample.
+    # Estimate the noise on real pixels only. On a movie masked to zero outside the
+    # cell, the zeros dominate the sigma-clipped statistics: std collapses toward 0
+    # and the threshold with it, or the median shifts and most detections vanish.
+    # Either way the count would depend on how much of the frame was blanked.
     finite = np.isfinite(a)
     zero_frac = float((a == 0).mean())
     sample = a[finite & (a != 0)] if zero_frac > 0.10 else a[finite]
@@ -92,7 +91,7 @@ def detect_frame(img: np.ndarray, cfg) -> pd.DataFrame:
                            **_roundness_kwargs(d.roundness))
     # photutils warns when a frame yields nothing, or nothing passes the shape cuts.
     # Both are normal (a blank frame, a frame between blinks) and are handled below,
-    # so the warning is noise that would read as an error to a user.
+    # so the warning is suppressed.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         tbl = finder(a - median)
@@ -112,12 +111,12 @@ def detect_stack(stack: np.ndarray, cfg, mask: np.ndarray | None = None,
     mask, if given, is a boolean (Y, X) array; detections outside it are dropped, which
     is how a cell outline or a soma exclusion is applied.
 
-    THE MASK MUST BE IN DRIFT-CORRECTED COORDINATES. This function runs after
+    The mask is applied after drift correction. This function runs after
     preprocess.correct_drift, so the stack has been aligned to the median of the first
-    `drift.reference_frames` frames. A mask drawn on the RAW movie is offset by the
-    drift and will clip the wrong pixels - silently, because a slightly wrong mask
-    still returns plausible detections. Draw it on `Result.stack[0]`, or on a
-    projection of the corrected stack, not on the original file.
+    `drift.reference_frames` frames. A mask drawn on the raw movie is offset by the
+    drift and clips the wrong pixels, and a slightly wrong mask still returns
+    plausible detections, so draw it on `Result.stack[0]` or on a projection of the
+    corrected stack rather than on the original file.
     """
     if mask is not None:
         mask = np.asarray(mask)

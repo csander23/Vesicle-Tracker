@@ -1,4 +1,4 @@
-"""Filters that LABEL vesicles rather than deleting them.
+"""Filters that label vesicles rather than deleting them.
 
 Every tracked vesicle appears in the output with a `passes_filter` boolean and a
 `filter_reason` naming the first rule it failed. The subset that passes is also written
@@ -7,20 +7,20 @@ separately, so a video yields two lists:
     vesicles_all.csv        every vesicle, every number, nothing removed
     vesicles_filtered.csv   the subset passing the configured filters
 
-Deleting rows upstream is convenient and wrong. Once a vesicle is gone you cannot ask
+Rows are not deleted upstream because once a vesicle is gone there is no way to ask
 how many were excluded, whether the excluded ones differ systematically, or what a
-different threshold would have given - and those are exactly the questions a reviewer
-asks. Keeping everything makes the filter a reversible, auditable choice.
+different threshold would have given. Keeping everything makes the filter a
+reversible, auditable choice.
 
 The one exception is upstream of this module: tracks below `link.min_length_frames`
 (default 3) never reach scoring, because a two-frame track has a single step and no
-metric can be computed from it. That floor is deliberately far below any scientific
-cut, and the count discarded by it is reported in the summary.
+metric can be computed from it. That floor is far below any scientific cut, and the
+count discarded by it is reported in the summary.
 
-SELECTION BIAS WARNING, applied by `max_observed_frames` / `max_lifetime_s`: an upper
-bound on lifetime preferentially keeps tracks the tracker LOST early. Filtering on it
-selects for tracking failure, not for short-lived biology. The censored count in
-`summary.json` is there so the effect stays visible.
+Warning: an upper bound on lifetime (`max_observed_frames` / `max_lifetime_s`)
+preferentially keeps tracks the tracker lost early, so filtering on it selects for
+tracking failure rather than for short-lived biology. The censored count in
+`summary.json` is reported so the effect stays visible.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import pandas as pd
 
 
 def _rule_list(cfg):
-    """(name, predicate) pairs. Predicate returns True for vesicles that PASS."""
+    """(name, predicate) pairs. Predicate returns True for vesicles that pass."""
     f = cfg.filters
     rules = []
     if f.min_observed_frames is not None:
@@ -54,12 +54,12 @@ def _rule_list(cfg):
         rules.append((f"longest_gap>{f.max_longest_gap}",
                       lambda d: d.longest_gap <= f.max_longest_gap))
     if f.require_directed_measurable:
-        # The EXACT condition, not a proxy for it. Whether `directed` exists depends on
-        # how many observed frames land in each tau-window, which no threshold on span
-        # or on total observed frames can express: tracks passing span>=180 and
-        # observed>=40 still came back unmeasurable when their frames clustered into
-        # too few windows. Filtering on the computed flag makes "filtered" mean usable
-        # by construction, whatever the parameters interact into.
+        # This checks the computed flag rather than a proxy for it. Whether `directed`
+        # exists depends on how many observed frames land in each tau-window, which no
+        # threshold on span or on total observed frames can express: a track can pass
+        # span>=180 and observed>=40 and still be unmeasurable if its frames cluster
+        # into too few windows. Filtering on the flag makes "filtered" mean usable by
+        # construction, whatever the other parameters are.
         rules.append(("directed not measurable",
                       lambda d: d.directed_measurable.astype(bool)
                       if "directed_measurable" in d
@@ -99,7 +99,7 @@ def apply_filters(vesicles: pd.DataFrame, cfg) -> pd.DataFrame:
     for name, pred in _rule_list(cfg):
         ok = pred(d).fillna(False).astype(bool)
         newly_failed = passes & ~ok
-        reason[newly_failed] = name          # first failing rule, not a list
+        reason[newly_failed] = name          # only the first failing rule is kept
         passes &= ok
     d["passes_filter"] = passes
     d["filter_reason"] = reason.where(~passes, "")
@@ -107,7 +107,7 @@ def apply_filters(vesicles: pd.DataFrame, cfg) -> pd.DataFrame:
 
 
 def filter_summary(vesicles: pd.DataFrame) -> dict:
-    """Counts by outcome, so what a filter removed is always visible."""
+    """Counts by outcome: how many passed, how many failed, and the reasons."""
     if not len(vesicles) or "passes_filter" not in vesicles:
         return {"n_all": int(len(vesicles)), "n_pass": 0, "n_fail": 0, "reasons": {}}
     fail = vesicles[~vesicles.passes_filter]
