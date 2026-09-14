@@ -2,14 +2,8 @@
 
 Detect, track and score intracellular vesicles in live imaging microscopy.
 
-The goal of this software is to extract data on vesicle movement from live-imaging
-videos of fluorescently labelled vesicles. Each frame is motion corrected, vesicles are
-found with a pretrained neural network (deepBLINK, Eichenberger et al. 2021), the
-detections are joined into tracks with the gaps the network leaves repaired, and every
-vesicle gets three movement distances: gross, the path it actually travelled; net, start
-to end; and directed, the path with the frame-by-frame jitter smoothed away. A
-significance test then says whether a vesicle moved more than chance. The aim is to let
-new questions be asked about the quantity and quality of intracellular vesicle movement.
+The goal of this vesicle-tracking algorithm is to extract data regarding vesicle
+movement from live-imaging videos of labelled fluorescent vesicles.
 
 ```python
 from vesicletrack import Config, analyse
