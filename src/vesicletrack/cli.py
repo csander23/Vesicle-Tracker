@@ -28,7 +28,7 @@ def main(argv=None) -> int:
     ap.add_argument("--rois", default=None,
                     help="regions to label, applied to every movie: ImageJ .roi/.zip, "
                          "a mask or label image, or .npy. Vesicles outside every "
-                         "region are KEPT and labelled 'outside', not discarded.")
+                         "region are kept and labelled 'outside'.")
     ap.add_argument("--channel", type=int, default=None,
                     help="channel index, for multi-channel files")
     ap.add_argument("--z-project", choices=["max", "mean"], default=None,
