@@ -1,9 +1,8 @@
 # vesicletrack
 
-Detect, track and score intracellular vesicles in time-lapse microscopy. Detection is
+Detect, track and score intracellular vesicles in live imaging microscopy. Detection is
 a pretrained neural network (deepBLINK); tracking repairs the gaps the network leaves;
-scoring gives every vesicle three movement distances and a significance test. All
-parameters live in one config file; the only other input is the movie.
+scoring gives every vesicle three movement distances and a significance test.
 
 ```python
 from vesicletrack import Config, analyse
@@ -436,8 +435,8 @@ Parameter reference: [docs/PARAMETERS.md](docs/PARAMETERS.md) lists every parame
 with its units, default, and which direction to move it. The same notes are inline in
 `config/default.yaml`, and a test checks that both stay consistent with the code.
 
-## Licence
+## License
 
 MIT. The bundled `vesicle.h5` model is the pretrained model published with deepBLINK
-(Eichenberger et al., 2021) and is redistributed under its licence; please cite that
+(Eichenberger et al., 2021) and is redistributed under its license; please cite that
 paper when you use it.
