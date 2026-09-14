@@ -319,6 +319,7 @@ EMPTY_SCHEMA = [
     "max_step", "n_big_steps", "net_rate", "gross_rate", "directed_rate",
     "censored_start", "censored_end", "invalid", "n_nonfinite",
     "n_tau_windows", "tau_frames", "tau_directed_frames", "x0", "y0",
+    "n_recovered_frames", "frac_recovered",
 ]
 
 
@@ -346,6 +347,10 @@ def score_tracks(tracks: pd.DataFrame, cfg,
                                 n_movie_frames=n_movie_frames)
         rec["particle"] = int(p)
         rec["x0"], rec["y0"] = float(d.x.iloc[0]), float(d.y.iloc[0])
+        # How much of this track came from gap recovery rather than direct detection.
+        n_rec = int(d.recovered.sum()) if "recovered" in d.columns else 0
+        rec["n_recovered_frames"] = n_rec
+        rec["frac_recovered"] = n_rec / len(d)
         rows.append(rec)
     if not rows:
         # An empty frame with the full schema. A bare DataFrame() has no columns, so

@@ -9,13 +9,15 @@ of stopping, and writes the pooled tables at every level.
 
 Order of operations:
 
-  load -> drift-correct -> detect -> link -> score -> classify -> size -> roi -> filter
+  load -> drift-correct -> detect (deepBLINK) -> link -> recover gaps -> merge
+       -> score -> classify -> size -> roi -> filter
 
 Drift correction runs before detection because stage drift moves every vesicle
-together and would otherwise be measured as transport in all of them. Classification
-runs after scoring because the mover test compares each vesicle against its own
-permutation null, which needs the metrics first. Filters run last and only add a
-label, so every earlier stage sees every vesicle.
+together and would otherwise be measured as transport in all of them. The network's
+probability maps are kept through linking so that gap recovery can read them.
+Classification runs after scoring because the mover test compares each vesicle
+against its own permutation null, which needs the metrics first. Filters run last and
+only add a label, so every earlier stage sees every vesicle.
 """
 from __future__ import annotations
 
@@ -183,9 +185,9 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
             array, or {name: polygon}. Vesicles are labelled by region; those outside
             every region are kept and labelled "outside".
     mask    where to detect: a boolean array, or any file roi.load_rois accepts.
-            Detections outside it are dropped, so use it to restrict analysis to one
-            cell (a traced outline) and `rois` to label parts of the cell
-            (soma/process).
+            Detections outside it are dropped and gap recovery does not look there,
+            so use it to restrict analysis to one cell (a traced outline) and `rois`
+            to label parts of the cell (soma/process).
     **meta  extra columns stamped on every row (batch=, group=, genotype=, ...) so
             results from many movies can be pooled without parsing filenames.
 
@@ -216,14 +218,21 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
         say(f"  drift {span:.2f} px" + ("  (below threshold, not applied)"
                                         if span < cfg.drift.min_span_px else ""))
 
-    spots = _detect.detect_stack(stack_c, cfg, mask=mask, progress=progress)
+    if mask is not None:
+        mask = np.asarray(mask) != 0
+    maps = _detect.maps_for(stack_c, cfg, name, progress=progress)
+    spots = _detect.detections_from_maps(maps, cfg.detect.prob_threshold,
+                                         stack_c.shape[1], stack_c.shape[2], mask=mask)
     say(f"  {len(spots)} detections "
-        f"({len(spots) / max(1, len(stack_c)):.1f} per frame)")
+        f"({len(spots) / max(1, len(stack_c)):.1f} per frame, deepBLINK "
+        f"{_detect.model_path(cfg.detect.model).stem}, p > {cfg.detect.prob_threshold})")
 
-    tracks = _link.link(spots, cfg)
+    tracks, n_dropped = _link.link(spots, maps, cfg, len(stack_c), mask=mask)
+    del maps
     n_ves = tracks.particle.nunique() if len(tracks) else 0
-    say(f"  {n_ves} vesicles after linking "
-        f"(hard floor {cfg.link.min_length_frames} frames)")
+    n_recovered = int(tracks.recovered.sum()) if len(tracks) else 0
+    say(f"  {n_ves} vesicles ({n_dropped} tracks under {cfg.link.min_length_frames} "
+        f"frames dropped, {n_recovered} frames recovered)")
 
     vesicles = _metrics.score_tracks(tracks, cfg, n_movie_frames=len(stack_c))
 
@@ -262,7 +271,11 @@ def analyse(path, config: Config | None = None, *, name: str | None = None,
         height=int(stack.shape[1]), width=int(stack.shape[2]),
         dt_seconds=cfg.dt_seconds, um_per_px=cfg.um_per_px,
         duration_s=float(stack.shape[0] * cfg.dt_seconds),
-        drift_span_px=span, n_detections=int(len(spots)), n_vesicles=int(n_ves),
+        drift_span_px=span, n_detections=int(len(spots)),
+        detections_per_frame=round(len(spots) / max(1, len(stack_c)), 2),
+        model=_detect.model_path(cfg.detect.model).stem,
+        n_vesicles=int(n_ves), n_dropped_short=int(n_dropped),
+        n_recovered_frames=int(n_recovered),
         counts=counts, ordering_violations=int(len(bad)),
         filters=fsum if len(vesicles) else {},
         roi_names=roi_names, roi_coverage=_roi.coverage(roi_labels, roi_names),

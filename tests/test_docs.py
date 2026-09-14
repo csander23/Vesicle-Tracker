@@ -99,7 +99,7 @@ def test_documented_defaults_match_the_code():
     """The `default` column of each table in PARAMETERS.md is the real default.
 
     Tables sit under a "## `section`" heading, so the same name in two sections
-    (detect.psf_sigma_px vs size.psf_sigma_px) is checked against its own default.
+    (`enabled` in drift, recover and size) is checked against its own default.
     """
     code = vcfg.Config().to_dict()
     sec, bad = "", []

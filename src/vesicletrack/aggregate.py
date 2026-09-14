@@ -42,7 +42,7 @@ import pandas as pd
 DEFAULT_METRICS = ["net", "gross", "directed", "net_rate", "gross_rate",
                    "directed_rate", "observed_frames", "span_frames", "observed_s",
                    "span_s", "frac_observed", "n_gaps", "longest_gap",
-                   "sigma_px", "sigma_deconv_px", "fwhm_px"]
+                   "frac_recovered", "sigma_px", "sigma_deconv_px", "fwhm_px"]
 
 
 def _unpack(item) -> tuple[str, pd.DataFrame, dict]:

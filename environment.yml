@@ -2,20 +2,10 @@ name: vesicletrack
 channels: [conda-forge]
 dependencies:
   - python=3.11
-  - numpy
-  - pandas
-  - scipy
-  - scikit-image
-  - matplotlib
-  - pyyaml
-  - tifffile
-  - pyarrow
-  - astropy
-  - photutils
-  - trackpy
-  - opencv
   - ffmpeg            # needed only for video output
-  - jupyterlab
-  - tqdm
   - pip
-  - pip: [nd2]        # optional, for reading .nd2 directly
+  # Everything Python comes from pip so that TensorFlow, deepBLINK and the compiled
+  # scientific packages share one NumPy build. Mixing conda and pip wheels here
+  # produced a binary mismatch on macOS arm64.
+  - pip:
+      - -e .[all]

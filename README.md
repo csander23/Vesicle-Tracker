@@ -1,7 +1,9 @@
 # vesicletrack
 
-Detect, track and score intracellular vesicles in time-lapse microscopy. All parameters
-live in one config file; the only other input is the movie.
+Detect, track and score intracellular vesicles in time-lapse microscopy. Detection is
+a pretrained neural network (deepBLINK); tracking repairs the gaps the network leaves;
+scoring gives every vesicle three movement distances and a significance test. All
+parameters live in one config file; the only other input is the movie.
 
 ```python
 from vesicletrack import Config, analyse
@@ -34,7 +36,7 @@ cellB.tif,ApoE4,B1
 
 ---
 
-## The problem this solves
+## What it measures
 
 The two simple measures of vesicle movement both fail on high-frame-rate data, and
 they fail differently:
@@ -44,8 +46,8 @@ they fail differently:
 | **gross** | Σ per-frame step lengths | a stationary vesicle accumulates localisation noise every frame. Over 1000 frames it "travels" hundreds of pixels. Gross path is mostly noise. |
 | **net** | \|end − start\| | blind to a vesicle that runs out and comes back, or makes several runs in different directions. A genuinely motile trajectory scores ≈ 0. |
 
-In the demo below, a vesicle that moved 14 px reports 179 px of gross path, and the
-stationary ones report 181 px. Gross does not separate them.
+In the demo below, a vesicle that moved 14 px reports 178 px of gross path, and the
+stationary ones report 186 px. Gross does not separate them.
 
 The directed metric averages positions in windows of τ frames before measuring the
 path:
@@ -79,18 +81,60 @@ p-value follows from it.
 
 ---
 
+## How detection and tracking work
+
+**Detection** is deepBLINK (Eichenberger et al., 2021, https://github.com/BBQuercus/deepBlink),
+a convolutional network trained to find diffraction-limited spots, with its
+pretrained `vesicle` model bundled in the package (9.5 MB). The network scores each
+frame on its own: for every 4×4-pixel cell it returns the probability that a spot
+centre lies there and the centre's sub-pixel offset. A cell above
+`detect.prob_threshold` (default 0.5) is a detection. On a laptop CPU this takes
+about 45 ms per frame, so a 60 s movie at 22 frames per second needs about a minute.
+
+**Linking** joins detections in consecutive frames with trackpy (nearest neighbour
+within `link.search_range_px`, a memory of `link.memory_frames` for short dropouts).
+
+**Gap recovery** is what makes the network usable for tracking. It scores frames
+independently, so a vesicle that dims for a few frames drops out and its track breaks.
+Wherever a track has a gap, or ends, the probability map is read again at the
+predicted position with a lower threshold (`recover.threshold`, default 0.1), and the
+closest peak within `recover.radius_px` is accepted. Knowing the vesicle was there
+just before and just after is the evidence that justifies the lower threshold. On a
+crowded real cell this raised the fraction of frames in which tracked vesicles were
+seen from 68% to 95% without introducing identity swaps. Every recovered position is
+flagged in the `recovered` column of `tracks.parquet`, and every vesicle carries a
+`frac_recovered`.
+
+**Merging** rejoins fragments of one vesicle: fragments that follow each other
+closely in time and space, and fragments that coexist within a tight radius (an
+identity swap or a double detection). The rules were checked against vesicles
+followed by eye on a crowded cell.
+
+The probability maps are the slow part and depend only on the drift-corrected movie
+and the model. Set `detect.cache_dir` and every re-run with different linking or
+metric settings skips the network.
+
+---
+
 ## Install
 
 ```bash
+git clone https://github.com/csander23/Vesicle-Tracker.git
+cd Vesicle-Tracker
 conda env create -f environment.yml && conda activate vesicletrack
-pip install -e .
-pytest -q                      # 66 tests, ~1.5 min
+pytest -q
 ```
 
-or
+`environment.yml` creates a Python 3.11 environment and installs the package and
+every dependency with pip, including TensorFlow (CPU is enough) and deepBLINK. It
+installs the Python packages through pip rather than conda so that TensorFlow, deepBLINK
+and the compiled scientific libraries share one NumPy build; mixing the two produced a
+binary mismatch on macOS.
+
+Without conda:
 
 ```bash
-pip install -e ".[all]"      # opencv + nd2 + pyarrow
+pip install -e ".[all]"      # opencv + nd2 + pyarrow + jupyter + pytest
 ```
 
 `ffmpeg` is needed only for video output. It is looked for on `PATH` and next to the
@@ -107,16 +151,14 @@ python -m vesicletrack.cli examples/synthetic.tif --dt 0.05 -o examples/output
 ```
 
 Recovers all 30 vesicles and exactly the 6 planted movers, p = 0.005 for the movers
-and p = 1.00 for the static ones. That is `vesicles_filtered.csv`; `vesicles_all.csv`
-also holds the 670 short noise fragments (under 40 observed frames) that the filters
-labelled and kept. None of them scores as a mover.
+and p = 1.00 for the static ones:
 
 | class | net | directed | gross | p |
 |---|---|---|---|---|
-| mover (n=6) | 13.96 px | 11.68 px | 179.1 px | 0.005 |
-| confined (n=24) | 0.44 px | 0.55 px | 180.9 px | 1.000 |
+| mover (n=6) | 14.08 px | 11.65 px | 178.4 px | 0.005 |
+| confined (n=24) | 0.40 px | 0.57 px | 185.6 px | 1.000 |
 
-Net separates the classes 32-fold. Gross does not separate them at all; the confined
+Net separates the classes 35-fold. Gross does not separate them at all; the confined
 vesicles report more gross path than the movers. This is the reason for the directed
 metric.
 
@@ -157,14 +199,15 @@ cfg.save("runs/exp1.yaml")     # YAML
 cfg.to_json()                  # or just the string
 ```
 
-Unknown keys are rejected in either format, so a typo such as `thresold_sigma` raises
+Unknown keys are rejected in either format, so a typo such as `prob_treshold` raises
 an error at load instead of being ignored.
 
 Overrides use dotted paths and do not mutate the original, so a sweep is a loop:
 
 ```python
-for thr in [2.5, 3.0, 3.5]:
-    analyse(movie, cfg.copy(**{"detect.threshold_sigma": thr}))
+cfg.set("detect.cache_dir", "probmaps")            # network runs once
+for tau in [45, 90, 180]:
+    analyse(movie, cfg.copy(**{"metrics.tau_directed_frames": tau}))
 ```
 
 ## Setting parameters for a new dataset
@@ -183,11 +226,11 @@ Then, in rough order of importance:
 
 | parameter | raise it if | lower it if |
 |---|---|---|
-| `detect.threshold_sigma` | too many spurious spots | vesicles are being missed |
-| `detect.psf_sigma_px` | spots are larger than the default 1.3 px σ | |
-| `link.search_range_px` | vesicles move far between frames | you see identity swaps |
-| `link.min_length_frames` | tracks are too short to score | you lose real short-lived vesicles |
+| `detect.prob_threshold` | spurious spots in the middle panel of `three_panel.png` | vesicles are being missed |
+| `link.search_range_px` | vesicles move far between frames | you see identity swaps (rising `excluded` count) |
+| `link.min_length_frames` | short fragments clutter the output | you lose real short-lived vesicles |
 | `metrics.tau_directed_frames` | noise still dominates | genuine fast reversals are being erased |
+| `recover.radius_px` | recovery misses a vesicle that wandered | recovered points jump to neighbours |
 
 `metrics.tau_frames` ≈ 1 s and `tau_directed_frames` ≈ 4 s at your frame rate is a
 reasonable starting point. τ = 4 s was chosen against simulated ground truth: it
@@ -213,10 +256,10 @@ output/
 
   <movie>/
     config_used.yaml     exact parameters, so a figure always traces to its run
-    tracks.parquet       particle, frame, x, y  (every vesicle, every frame)
+    tracks.parquet       particle, frame, x, y, recovered  (every vesicle, every frame)
     vesicles_all.csv     this movie's vesicles, with passes_filter + filter_reason
     vesicles_filtered.csv
-    summary.json         counts, drift span, filter breakdown, ROI coverage
+    summary.json         counts, drift span, frames recovered, filter breakdown
     three_panel.png      raw | all vesicles | classified
     distances.png        net / directed / gross distributions
     vesicles/*.png       per vesicle: trajectory + all three distances
@@ -228,7 +271,9 @@ Filters add a label. No vesicle is removed from the output. Every tracked vesicl
 `vesicles_all.csv` with `passes_filter` and `filter_reason` naming the rule it failed.
 Any threshold can be re-derived from that file later, so a filter is a reversible,
 auditable choice, and the question "how many did we exclude, and were they different?"
-can always be answered.
+can always be answered. The one deletion in the pipeline happens earlier: tracks with
+fewer than `link.min_length_frames` detected frames never reach scoring, and the count
+is in `summary.json`.
 
 Group-level `n` is the number of videos, not the number of vesicles. Vesicles within
 one cell share a cell, a transfection and a field of view; treating each as a
@@ -253,11 +298,11 @@ res = analyse("cell.tif", cfg, mask="cell_outline.tif")     # where to detect
 res = analyse("cell.tif", cfg, rois="soma_and_processes.zip") # how to label what was found
 ```
 
-`mask` restricts detection: nothing outside it is tracked. Use it to analyse one cell
-when a field holds several. `rois` labels each vesicle by region and keeps the rest.
-Both take the same inputs (ImageJ `.roi`/`.zip`, mask or label images, arrays,
-polygons), and both are applied in drift-corrected coordinates. When drift is not
-negligible, draw them on a projection of `Result.stack` rather than the raw file.
+`mask` restricts detection and gap recovery: nothing outside it is tracked. Use it to
+analyse one cell when a field holds several. `rois` labels each vesicle by region and
+keeps the rest. Both take the same inputs (ImageJ `.roi`/`.zip`, mask or label images,
+arrays, polygons), and both are applied in drift-corrected coordinates. When drift is
+not negligible, draw them on a projection of `Result.stack` rather than the raw file.
 
 #### ROI: in and out, never dropped
 
@@ -276,14 +321,17 @@ Vesicles that move between regions are assigned by majority and flagged
 
 ### Lifetime, gaps and censoring
 
-`span_frames` (first to last sighting) and `observed_frames` (frames actually detected)
-differ whenever the linker bridged a dropout; on real data the medians were 398 vs 167.
-Reporting only span describes a vesicle as present in frames where nothing was
-detected, so both are carried, with `n_gaps`, `longest_gap` and `frac_observed`.
+`span_frames` (first to last sighting) and `observed_frames` (frames in which the
+track has a position) differ whenever a gap was left open. With gap recovery most
+long-lived vesicles are followed for the whole movie; `n_recovered_frames` and
+`frac_recovered` say how much of each track came from recovery rather than direct
+detection, and `n_gaps`, `longest_gap` and `frac_observed` describe what is still
+missing.
 
 `is_censored` marks vesicles present in the first or last frame: their true lifetime
 was not observed, and pooling them with complete observations biases mean lifetime
-downward.
+downward. Tracked lifetime is a property of the tracker as much as of the vesicle,
+so compare it between tracking settings, not between biological conditions.
 
 ### Size
 
@@ -304,8 +352,9 @@ common to both and cancels.
 | `directed_measurable` | False when the track spans under two τ-windows; `directed` is then NaN rather than 0 |
 | `runs_total` | run-detection metric at the shorter `tau_frames` |
 | `runs_p`, `runs_z`, `runs_excess` | the permutation test of `runs_total`, not of `directed` |
-| `span_frames`, `observed_frames` | track span vs frames actually detected; they differ whenever a dropout was bridged |
-| `n_gaps`, `longest_gap`, `frac_observed` | how much of the span was really seen |
+| `span_frames`, `observed_frames` | track span vs frames with a position |
+| `n_recovered_frames`, `frac_recovered` | how much of the track came from gap recovery |
+| `n_gaps`, `longest_gap`, `frac_observed` | how much of the span is still missing |
 | `is_censored` | present in the first or last frame, so its true lifetime is unknown |
 | `sigma_px`, `sigma_deconv_px`, `at_diffraction_limit` | size (see the caveats above) |
 | `roi`, `roi_frac`, `roi_changed` | which region, and whether it moved between regions |
@@ -316,18 +365,25 @@ common to both and cancels.
 
 `invalid` means a non-finite coordinate; no biological claim is made about it.
 `excluded` is a tracking-quality judgement rather than biology: a single large jump or
-repeated large steps is the signature of an identity swap between nearby vesicles.
-Leaving those in inflates the mover count.
+repeated large steps is the signature of an identity swap between nearby vesicles, or
+of recovered points snapping between grid cells. Leaving those in inflates the mover
+count.
 
 ---
 
 ## Caveats
 
-- Detection is DAOStarFinder, chosen so the toolkit ships no model weights. A learned
-  detector will do better on dim or dense fields.
-- Tracking is `trackpy` nearest-neighbour linking. It has no explicit model of
-  merging/splitting vesicles; fusion events appear as one track ending and another
-  beginning.
+- The detector was trained by its authors on diffraction-limited spots. It works on
+  bright, round vesicles out of the box; a different marker or optics may need one of
+  deepBLINK's other pretrained models (`detect.model`) or a model you train with
+  deepBLINK's own tools.
+- Recovered positions snap to the network's 4 px grid, so a stationary vesicle whose
+  recovered frames alternate between two cells shows a 4 px back-and-forth that is not
+  motion. Net and directed distances are unaffected; gross path and per-frame speeds
+  are inflated by it, which is one reason they are not the primary readouts.
+- Tracking is `trackpy` nearest-neighbour linking plus the merge rules above. It has
+  no explicit model of merging/splitting vesicles; fusion events appear as one track
+  ending and another beginning.
 - The `mover` / `confined` split is a statement about directional persistence, not
   about mechanism. A vesicle can be motor-driven and still score confined if it never
   holds a direction for longer than τ.
@@ -341,6 +397,7 @@ Leaving those in inflates the mover count.
 ```
 vesicletrack/
 ├── README.md                  what it does and why
+├── environment.yml            conda env: Python 3.11 + pip install of everything
 ├── config/
 │   └── default.yaml           every parameter, commented. Copy and edit this
 ├── docs/
@@ -350,16 +407,18 @@ vesicletrack/
 ├── examples/
 │   └── make_synthetic.py      ground-truth movie (24 static + 6 movers)
 ├── tests/                     pytest -q
-│   ├── conftest.py            the synthetic movie and a config scaled to it
+│   ├── conftest.py            the synthetic movie, a config scaled to it, a map cache
 │   ├── test_smoke.py          does it get the known answer right?
-│   ├── test_robustness.py     edge cases, odd inputs, every switch
+│   ├── test_robustness.py     edge cases, odd inputs, every switch, recovery, merging
 │   └── test_docs.py           docs cannot drift from the code
 └── src/vesicletrack/
+    ├── models/vesicle.h5      deepBLINK's pretrained vesicle model
     ├── config.py              parameters, validation, YAML/JSON round-trip
     ├── io.py                  load stacks (tif/nd2/npy), sample sheets, write tables
     ├── preprocess.py          stage drift correction
-    ├── detect.py              per-frame spot detection + NMS
-    ├── linking.py             trackpy linking, fragment merge, short-track floor
+    ├── detect.py              deepBLINK probability maps and detections
+    ├── linking.py             trackpy linking, gap recovery, fragment merging
+    ├── recover.py             gap recovery from the probability maps
     ├── metrics.py             net / gross / directed, permutation null, classification
     ├── size.py                vesicle width, PSF calibration, deconvolution
     ├── roi.py                 masks and regions: load, label, assign
@@ -379,4 +438,6 @@ with its units, default, and which direction to move it. The same notes are inli
 
 ## Licence
 
-MIT.
+MIT. The bundled `vesicle.h5` model is the pretrained model published with deepBLINK
+(Eichenberger et al., 2021) and is redistributed under its licence; please cite that
+paper when you use it.

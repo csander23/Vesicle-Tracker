@@ -48,25 +48,42 @@ class DriftConfig:
 
 @dataclass
 class DetectConfig:
-    method: str = "dao"               # "dao" (photutils) - the only built-in backend
-    psf_sigma_px: float = 1.3         # approximate spot sigma
-    threshold_sigma: float = 3.0      # detection threshold, in background sigma
-    roundness: float = 0.7            # |roundness1| cut; rejects streaks and edges
-    min_separation_px: float = 4.0    # per-frame non-maximum suppression radius
-    background_sigma: float = 0.0     # >0 subtracts a gaussian background first
+    """deepBLINK, a convolutional network trained to find diffraction-limited spots.
+
+    The network scores each frame on its own. For every 4x4-pixel cell it returns the
+    probability that a spot centre lies there and the centre's sub-pixel offset; a
+    cell above `prob_threshold` is a detection. See detect.py.
+    """
+    model: str = "vesicle"            # bundled deepBLINK model, or a path to a .h5 file
+    prob_threshold: float = 0.5       # probability above which a grid cell is a spot
+    batch_frames: int = 32            # frames per network call
+    cache_dir: str | None = None      # keep probability maps here; null = recompute
 
 
 @dataclass
 class LinkConfig:
     search_range_px: float = 3.0      # max frame-to-frame displacement
     memory_frames: int = 15           # frames a spot may vanish and still be relinked
-    min_length_frames: int = 3        # hard floor: below this no metric exists at all
-                                      #   (a 2-frame track has one step). The
-                                      #   scientific length cut lives in `filters`,
-                                      #   where it labels instead of deleting.
-    merge_radius_px: float = 4.0      # fragments closer than this at the junction merge
-    merge_max_gap_frames: int = 15    # "look back" window for rejoining a lost vesicle
-    merge_overlap_tolerance: int = 2  # frames of overlap still treated as one vesicle
+    min_length_frames: int = 40       # tracks with fewer detected frames are dropped
+                                      #   before recovery and merging (see linking.py)
+    merge_colocated_px: float = 4.0   # tracks whose mean positions are this close are
+                                      #   one vesicle; 0 = off
+    merge_gap_frames: int = 60        # fragment B may follow fragment A by this long...
+    merge_gap_radius_px: float = 6.0  #   ...if it starts this close to where A ended
+    merge_overlap_frames: int = 15    # fragments coexisting this long...
+    merge_overlap_radius_px: float = 3.0  # ...this close together are one vesicle
+
+
+@dataclass
+class RecoverConfig:
+    """Gap recovery: ask the network again, more leniently, where a track predicts a
+    vesicle should be. See recover.py."""
+    enabled: bool = True
+    threshold: float = 0.1            # local probability threshold at the prediction
+    radius_px: float = 2.0            # accept the closest peak within this distance
+    search_cells: int = 1             # grid cells searched around the prediction
+    max_extend_frames: int = 60       # how far past a track's ends to keep looking
+    max_misses: int = 8               # stop extending after this many misses in a row
 
 
 @dataclass
@@ -124,10 +141,9 @@ class FiltersConfig:
     Every vesicle is reported either way, with `passes_filter` and `filter_reason`,
     and the passing subset is written to a second file. `null` means the rule is off.
     """
-    min_observed_frames: int | None = 40   # frames actually detected. A tracking
-                                           #   quality cut, not the `directed`
-                                           #   requirement, which is on span.
-    min_span_frames: int | None = None     # first-to-last extent; null = off
+    min_observed_frames: int | None = None  # frames actually detected; the hard floor
+                                            #   link.min_length_frames already applies
+    min_span_frames: int | None = None      # first-to-last extent; null = off
     require_directed_measurable: bool = True   # exact guarantee that `directed` exists
                                                #   for everything in the filtered set
     max_observed_frames: int | None = None
@@ -135,6 +151,7 @@ class FiltersConfig:
     max_lifetime_s: float | None = None     # see the selection-bias warning in filters.py
     min_frac_observed: float | None = 0.0   # reject tracks that are mostly gap
     max_longest_gap: int | None = None      # frames
+    max_frac_recovered: float | None = None # reject tracks that are mostly recovered
     exclude_censored: bool = False          # tracks touching the first or last frame
     exclude_classes: list = field(default_factory=lambda: ["excluded"])
     rois: list = field(default_factory=list)    # empty = keep every region
@@ -161,8 +178,8 @@ class RenderConfig:
 # and the docs test all read it, so a new section cannot be added to one and missed
 # by the others.
 SECTIONS = {"drift": DriftConfig, "detect": DetectConfig, "link": LinkConfig,
-            "size": SizeConfig, "metrics": MetricsConfig, "classify": ClassifyConfig,
-            "filters": FiltersConfig, "render": RenderConfig}
+            "recover": RecoverConfig, "size": SizeConfig, "metrics": MetricsConfig,
+            "classify": ClassifyConfig, "filters": FiltersConfig, "render": RenderConfig}
 
 
 @dataclass
@@ -173,6 +190,7 @@ class Config:
     drift: DriftConfig = field(default_factory=DriftConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     link: LinkConfig = field(default_factory=LinkConfig)
+    recover: RecoverConfig = field(default_factory=RecoverConfig)
     size: SizeConfig = field(default_factory=SizeConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
@@ -223,7 +241,7 @@ class Config:
         return cls(**kwargs)
 
     def set(self, dotted: str, value: Any) -> None:
-        """cfg.set("detect.threshold_sigma", 2.5) - for notebook overrides."""
+        """cfg.set("detect.prob_threshold", 0.4) - for notebook overrides."""
         obj = self
         parts = dotted.split(".")
         for p in parts[:-1]:
@@ -291,6 +309,28 @@ class Config:
                 f"{self.drift.reference_frames}. 0 silently disables drift "
                 "correction and a negative value means 'all but the last N', "
                 "neither of which is ever intended.")
+        if not 0 < self.detect.prob_threshold < 1:
+            raise ValueError("detect.prob_threshold must be in (0, 1): it is a "
+                             "probability")
+        if self.detect.batch_frames < 1:
+            raise ValueError("detect.batch_frames must be >= 1")
+        if self.link.search_range_px <= 0:
+            raise ValueError("link.search_range_px must be > 0")
+        if self.link.memory_frames < 0:
+            raise ValueError("link.memory_frames must be >= 0")
+        if self.link.min_length_frames < 3:
+            raise ValueError("link.min_length_frames must be >= 3: a two-frame track "
+                             "has a single step and no measurable motion")
+        if self.recover.enabled:
+            if not 0 < self.recover.threshold < self.detect.prob_threshold:
+                raise ValueError(
+                    f"recover.threshold={self.recover.threshold} must lie between 0 and "
+                    f"detect.prob_threshold={self.detect.prob_threshold}: recovery "
+                    "accepts weaker responses than detection, so a threshold at or "
+                    "above the detection threshold can never recover anything")
+            if self.recover.radius_px <= 0 or self.recover.search_cells < 0:
+                raise ValueError("recover.radius_px must be > 0 and "
+                                 "recover.search_cells >= 0")
         # The permutation p-value cannot go below 1/(n+1). A threshold under that
         # floor makes `mover` unreachable for every vesicle, with no error.
         floor = 1.0 / (self.metrics.n_permutations + 1)
@@ -304,9 +344,6 @@ class Config:
                 f"{int(round(1 / self.classify.p_threshold)) - 1}.")
         if self.um_per_px is not None and self.um_per_px <= 0:
             raise ValueError("um_per_px must be > 0 or null")
-        if self.detect.method != "dao":
-            raise ValueError(f"unknown detect.method {self.detect.method!r}; "
-                             "only 'dao' is built in")
         if self.metrics.tau_directed_frames < self.metrics.tau_frames:
             raise ValueError("tau_directed_frames should be >= tau_frames: the "
                              "directed path is measured at the coarser timescale")

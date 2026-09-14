@@ -56,7 +56,7 @@ def test_config_rejects_bad_values():
     with pytest.raises(ValueError):
         Config.load(None, **{"dt_seconds": 0})
     with pytest.raises(ValueError):
-        Config.load(None, **{"detect.method": "nope"})
+        Config.load(None, **{"detect.prob_threshold": 1.5})
 
 
 def test_config_roundtrip(tmp_path):

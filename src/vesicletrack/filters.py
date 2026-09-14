@@ -12,10 +12,9 @@ how many were excluded, whether the excluded ones differ systematically, or what
 different threshold would have given. Keeping everything makes the filter a
 reversible, auditable choice.
 
-The one exception is upstream of this module: tracks below `link.min_length_frames`
-(default 3) never reach scoring, because a two-frame track has a single step and no
-metric can be computed from it. That floor is far below any scientific cut, and the
-count discarded by it is reported in the summary.
+The one exception is upstream of this module: tracks with fewer than
+`link.min_length_frames` detected frames (default 40) never reach scoring; linking.py
+explains why, and the count dropped is reported in the summary.
 
 Warning: an upper bound on lifetime (`max_observed_frames` / `max_lifetime_s`)
 preferentially keeps tracks the tracker lost early, so filtering on it selects for
@@ -53,6 +52,10 @@ def _rule_list(cfg):
     if f.max_longest_gap is not None:
         rules.append((f"longest_gap>{f.max_longest_gap}",
                       lambda d: d.longest_gap <= f.max_longest_gap))
+    if f.max_frac_recovered is not None:
+        rules.append((f"frac_recovered>{f.max_frac_recovered}",
+                      lambda d: d.frac_recovered <= f.max_frac_recovered
+                      if "frac_recovered" in d else pd.Series(True, index=d.index)))
     if f.require_directed_measurable:
         # This checks the computed flag rather than a proxy for it. Whether `directed`
         # exists depends on how many observed frames land in each tau-window, which no

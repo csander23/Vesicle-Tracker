@@ -20,7 +20,10 @@ import tifffile
 
 from conftest import ROOT, base_cfg
 from vesicletrack import Config, analyse, analyse_many
+from vesicletrack import detect as vdet
 from vesicletrack import io as vio
+from vesicletrack import linking as vlink
+from vesicletrack import recover as vrec
 
 
 # ------------------------------------------------------------------- inputs
@@ -97,25 +100,23 @@ def test_pure_noise_makes_no_movers(tmp_path):
     assert int(r.counts().get("mover", 0)) == 0
 
 
-def test_directed_is_nan_not_zero_when_unmeasurable(movie):
+def test_directed_is_nan_not_zero_when_unmeasurable(movie, tmp_path):
     """A track spanning under two tau-windows has no directed value: NaN, not 0.0.
 
     0.0 would be indistinguishable from a vesicle that did not move, and because
-    net_coarse would be 0 as well, the ordering check would still pass.
+    net_coarse would be 0 as well, the ordering check would still pass. A 48-frame
+    movie at tau = 40 leaves 8 frames in the second window, under the occupancy floor,
+    so no track can be measured.
     """
-    r = analyse(movie, base_cfg(**{"link.min_length_frames": 5,
-                                   "metrics.tau_directed_frames": 40,
-                                   "filters.min_observed_frames": 5}),
-                verbose=False)
-    v = r.vesicles
+    p = tmp_path / "short.tif"
+    tifffile.imwrite(p, tifffile.imread(movie)[:48])
+    v = analyse(p, base_cfg(**{"link.min_length_frames": 5}), verbose=False).vesicles
     assert len(v) > 0
-    short = v[~v.directed_measurable]
-    long_ = v[v.directed_measurable]
-    assert len(short), "fixture should contain tracks too short to score"
-    assert short.directed.isna().all()          # unmeasurable -> NaN
-    assert short.net_coarse.isna().all()
-    assert long_.directed.notna().all()         # measurable -> a real number
+    assert not v.directed_measurable.any()
+    assert v.directed.isna().all() and v.net_coarse.isna().all()
     assert (v.directed == 0).sum() == 0, "0.0 must never stand in for unmeasurable"
+    full = analyse(movie, base_cfg(), verbose=False).vesicles
+    assert full.directed_measurable.all() and full.directed.notna().all()
 
 
 def test_straight_mover_shorter_than_tau_is_not_reported_as_zero():
@@ -133,13 +134,13 @@ def test_straight_mover_shorter_than_tau_is_not_reported_as_zero():
 # ------------------------------------------------------------------- config
 def test_dotted_override_and_copy():
     c = base_cfg()
-    c2 = c.copy(**{"detect.threshold_sigma": 9.9})
-    assert c2.detect.threshold_sigma == 9.9
-    assert c.detect.threshold_sigma != 9.9          # original untouched
+    c2 = c.copy(**{"detect.prob_threshold": 0.9})
+    assert c2.detect.prob_threshold == 0.9
+    assert c.detect.prob_threshold != 0.9           # original untouched
 
 
 def test_roundtrip_preserves_everything(tmp_path):
-    c = base_cfg(**{"um_per_px": 0.107, "detect.threshold_sigma": 2.75})
+    c = base_cfg(**{"um_per_px": 0.107, "detect.prob_threshold": 0.4})
     p = tmp_path / "c.yaml"
     c.save(p)
     back = Config.load(p)
@@ -167,6 +168,8 @@ def test_validation_catches_bad_combinations():
         Config.load(None, **{"classify.p_threshold": 1.5})
     with pytest.raises(ValueError, match="um_per_px"):
         Config.load(None, **{"um_per_px": -1})
+    with pytest.raises(ValueError, match="recover.threshold"):
+        Config.load(None, **{"recover.threshold": 0.6})      # above detection
 
 
 # ------------------------------------------------------------------ options
@@ -627,3 +630,118 @@ def test_cli_mask_and_overview_flags(movie, tmp_path):
     assert out.returncode == 0, out.stderr
     ves = pd.read_csv(tmp_path / "o" / "vesicles_all.csv")
     assert ves.x0.max() <= s.shape[2] / 2 + 2
+
+
+# ------------------------------------------------ deepBLINK, recovery, merging
+def test_detections_match_deepblink_reference(synthetic_maps):
+    """detections_from_maps reproduces deepblink.data.get_coordinate_list."""
+    from deepblink.data import get_coordinate_list
+    stack, maps = synthetic_maps
+    H, W = stack.shape[1:]
+    S = vdet.padded_size(H, W)
+    ref = get_coordinate_list(maps[0].astype(np.float32), image_size=S, probability=0.5)
+    ref = ref[(ref[:, 0] < H) & (ref[:, 1] < W)]                    # (y, x), padding dropped
+    got = vdet.detections_from_maps(maps[:1], 0.5, H, W)
+    assert len(got) == len(ref) > 0
+    a = np.sort(np.round(np.c_[ref[:, 1], ref[:, 0]], 3), axis=0)
+    b = np.sort(np.round(got[["x", "y"]].to_numpy(), 3), axis=0)
+    np.testing.assert_allclose(a, b, atol=1e-3)
+
+
+def test_padding_and_flat_frames(synthetic_maps):
+    assert vdet.padded_size(160, 160) == 256 and vdet.padded_size(512, 512) == 512
+    assert vdet.padded_size(300, 100) == 512
+    stack, maps = synthetic_maps
+    assert maps.shape[1:] == (64, 64, 3)                            # 256 / 4
+    assert np.all(vdet.normalise(np.full((8, 8), 7.0)) == 0)       # no 0/0
+
+
+def test_recovery_fills_a_planted_gap(synthetic_maps):
+    """Remove 20 frames from a full-length track; recovery puts them back within 1.5 px."""
+    stack, maps = synthetic_maps
+    cfg = base_cfg()
+    spots = vdet.detections_from_maps(maps, 0.5, *stack.shape[1:])
+    tracks, _ = vlink.link(spots, maps, cfg.copy(**{"recover.enabled": False}),
+                           len(stack))
+    full = tracks.groupby("particle").size()
+    p = full[full == len(stack)].index[0]
+    tr = tracks[tracks.particle == p].copy()
+    removed = tr[(tr.frame >= 150) & (tr.frame < 170)]
+    tr = tr[(tr.frame < 150) | (tr.frame >= 170)]
+    out, n_added = vrec.recover(tr, maps, cfg, len(stack))
+    back = out[(out.frame >= 150) & (out.frame < 170)].set_index("frame")
+    assert n_added >= 20 and len(back) == 20
+    assert back.recovered.all()
+    d = np.hypot(back.x - removed.set_index("frame").x, back.y - removed.set_index("frame").y)
+    assert d.max() < 1.5
+
+
+def test_recovery_respects_the_mask(synthetic_maps):
+    stack, maps = synthetic_maps
+    cfg = base_cfg()
+    spots = vdet.detections_from_maps(maps, 0.5, *stack.shape[1:])
+    tracks, _ = vlink.link(spots, maps, cfg.copy(**{"recover.enabled": False}),
+                           len(stack))
+    p = tracks.groupby("particle").size().idxmax()
+    tr = tracks[tracks.particle == p]
+    tr = tr[(tr.frame < 150) | (tr.frame >= 170)]
+    mask = np.zeros(stack.shape[1:], bool)               # nothing allowed anywhere
+    out, n_added = vrec.recover(tr, maps, cfg, len(stack), mask=mask)
+    assert n_added == 0 and not out.recovered.any()
+
+
+def _frag(p, frames, x, y):
+    return pd.DataFrame({"particle": p, "frame": frames, "x": x, "y": y,
+                         "recovered": False})
+
+
+def test_merge_trajectories_joins_fragments_and_keeps_neighbours():
+    cfg = base_cfg()
+    a = _frag(0, np.arange(0, 100), 10.0, 10.0)
+    b = _frag(1, np.arange(120, 200), 11.0, 10.5)             # 20-frame gap, 1.1 px away
+    c = _frag(2, np.arange(0, 200), 30.0, 30.0)               # a distinct neighbour
+    d = _frag(3, np.arange(50, 150), 10.4, 10.2)              # coexists with a, 0.4 px away
+    out = vlink.merge_trajectories(pd.concat([a, b, c, d]), cfg.link)
+    ids = out.groupby("particle").frame.agg(["min", "max"])
+    groups = {tuple(out[out.particle == p].frame.agg(["min", "max"])) for p in ids.index}
+    assert out.particle.nunique() == 2                         # {a, b, d} and {c}
+    assert (out[out.frame == 60].groupby("particle").size() >= 1).all()
+    far = _frag(4, np.arange(120, 200), 25.0, 10.0)           # gap ok, 15 px away
+    out2 = vlink.merge_trajectories(pd.concat([a, far]), cfg.link)
+    assert out2.particle.nunique() == 2
+
+
+def test_merge_colocated_unions_by_mean_position():
+    a = _frag(0, np.arange(0, 100), 10.0, 10.0)
+    b = _frag(1, np.arange(100, 200), 12.0, 10.0)            # mean 2 px away
+    assert vlink.merge_colocated(pd.concat([a, b]), 4.0).particle.nunique() == 1
+    assert vlink.merge_colocated(pd.concat([a, b]), 0.0).particle.nunique() == 2
+    assert vlink.merge_colocated(pd.concat([a, b]), 1.0).particle.nunique() == 2
+
+
+def test_relabel_averages_shared_frames_and_keeps_recovered_flag():
+    a = _frag(0, [0, 1, 2], 10.0, 10.0)
+    b = _frag(0, [2, 3], 12.0, 10.0).assign(recovered=[True, True])
+    out = vlink.relabel(pd.concat([a, b]))
+    assert list(out.frame) == [0, 1, 2, 3] and out.particle.nunique() == 1
+    assert out.set_index("frame").x[2] == 11.0                # averaged
+    assert not out.set_index("frame").recovered[2]            # one source was detected
+    assert out.set_index("frame").recovered[3]
+
+
+def test_recovered_fraction_is_reported(movie):
+    r = analyse(movie, base_cfg(), verbose=False)
+    assert {"n_recovered_frames", "frac_recovered"} <= set(r.vesicles.columns)
+    assert r.summary["n_recovered_frames"] == int(r.tracks.recovered.sum())
+    assert r.summary["n_dropped_short"] >= 0 and r.summary["model"] == "vesicle"
+
+
+def test_probability_maps_are_cached(movie, tmp_path):
+    cfg = base_cfg(**{"detect.cache_dir": str(tmp_path / "maps")})
+    analyse(movie, cfg, name="c", verbose=False)
+    files = list((tmp_path / "maps").glob("c_vesicle_*.npy"))
+    assert len(files) == 1
+    stamp = files[0].stat().st_mtime_ns
+    analyse(movie, cfg, name="c", verbose=False)
+    assert files[0].stat().st_mtime_ns == stamp               # reused, not rewritten
+    assert np.load(files[0]).dtype == np.float16
