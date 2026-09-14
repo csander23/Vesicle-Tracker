@@ -1,7 +1,5 @@
 # vesicletrack
 
-Detect, track and score intracellular vesicles in live imaging microscopy.
-
 The goal of this vesicle-tracking algorithm is to extract data regarding vesicle
 movement from live-imaging videos of labelled fluorescent vesicles.
 
